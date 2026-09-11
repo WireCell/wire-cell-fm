@@ -35,8 +35,8 @@ repo_archive=$(readlink -f "$1")
 repodir="${_CONDOR_SCRATCH_DIR:-$PWD}/repo"
 mkdir -p "$repodir"
 tar xzf "$repo_archive" -C "$repodir" || { echo "FATAL: cannot unpack ${repo_archive}"; exit 3; }
-[ -d "${repodir}/wcfm" ] && [ -d "${repodir}/wirecell_fm.egg-info" ] || {
-  echo "FATAL: ${repo_archive} has no wcfm/ + wirecell_fm.egg-info. The model's config schemas"
+[ -d "${repodir}/wcfm" ] && [ -d "${repodir}/wire_cell_fm.egg-info" ] || {
+  echo "FATAL: ${repo_archive} has no wcfm/ + wire_cell_fm.egg-info. The model's config schemas"
   echo "come from an entry point read from that metadata; without it no model= preset resolves."
   exit 3
 }

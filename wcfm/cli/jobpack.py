@@ -8,7 +8,7 @@ writes one archive of the tree next to the run's own outputs and transfers that.
 written once and never touched again, so the run is pinned from the instant it is queued while
 the checkout stays editable. It is about a megabyte.
 
-What the job gets is a tree rather than an installed package, and `wirecell_fm.egg-info/` must
+What the job gets is a tree rather than an installed package, and `wire_cell_fm.egg-info/` must
 land beside `wcfm/` on the PYTHONPATH entry: the model's config schemas arrive through
 `[project.entry-points."wcfm.config_schemas"]`, which `importlib.metadata` reads from package
 metadata found by scanning `sys.path` directories. A tarball without it composes no `model=`
@@ -44,7 +44,7 @@ REQUIRED = (
     "gridutils",
     "pyproject.toml",
     "README.md",
-    "wirecell_fm.egg-info",
+    "wire_cell_fm.egg-info",
 )
 
 #: Packed when present and skipped when not, so a checkout without it still submits. `wcfm test
@@ -59,7 +59,7 @@ CONTENTS = (
     "gridutils",
     "pyproject.toml",
     "README.md",
-    "wirecell_fm.egg-info",
+    "wire_cell_fm.egg-info",
 )
 
 _EXCLUDE = {"__pycache__", ".pytest_cache", ".ruff_cache", ".venv", ".git"}
@@ -84,9 +84,9 @@ def check_repo(repo: Path, also: tuple[str, ...] = ()) -> None:
     """
     repo = Path(repo)
     missing = [c for c in (*REQUIRED, *also) if not (repo / c).exists()]
-    if "wirecell_fm.egg-info" in missing:
+    if "wire_cell_fm.egg-info" in missing:
         raise FileNotFoundError(
-            f"no wirecell_fm.egg-info in {repo}. The model's config schemas arrive through an "
+            f"no wire_cell_fm.egg-info in {repo}. The model's config schemas arrive through an "
             "entry point read from package metadata; without it no model= preset resolves on "
             "the worker. Regenerate it with:\n  uv pip install -e . --no-deps"
         )

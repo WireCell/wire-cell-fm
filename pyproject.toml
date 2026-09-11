@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wirecell-fm"
+name = "wire-cell-fm"
 version = "0.0.1"
 description = "A training framework for sparse-detector foundation models, and a model that runs on it"
 requires-python = ">=3.11,<3.12"
@@ -29,7 +29,7 @@ dev = [
 wcfm = "wcfm.cli.__main__:main"
 
 # How the model axis reaches a framework that may not import it. Entry points are read from
-# package metadata, so a checkout used via PYTHONPATH needs the `wirecell_fm.egg-info/` an
+# package metadata, so a checkout used via PYTHONPATH needs the `wire_cell_fm.egg-info/` an
 # editable install writes beside `wcfm/`; without it no `model=` option exists at all.
 [project.entry-points."wcfm.config_schemas"]
 model = "wcfm.model.config:register"

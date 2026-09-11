@@ -1,4 +1,4 @@
-# wirecell-fm
+# wire-cell-fm
 
 A training framework for Wire-Cell foundation models (`wcfm`), and a model that runs on it:
 self-supervised pretraining on LArTPC detector images, with an offline probe suite.
@@ -34,7 +34,7 @@ Read `conf/README.md` before changing anything here. The conventions:
   node. Add `_convert_: "all"` where nested containers must arrive as plain dicts rather than
   `DictConfig`.
 - The model axis arrives through the `wcfm.config_schemas` entry point, read from package
-  metadata, so `wirecell_fm.egg-info/` must sit beside `wcfm/`. Without it the whole `model=`
+  metadata, so `wire_cell_fm.egg-info/` must sit beside `wcfm/`. Without it the whole `model=`
   axis silently does not exist, and Hydra reports it as `Could not find 'model/term/base_dino'`.
 - A preset file carries `# @package _global_`; a sub-group option file does not.
 - A term is added with `+model/term@model.terms.X=X` and removed with `~model.terms.X`. A

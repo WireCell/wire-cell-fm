@@ -141,15 +141,18 @@ def test_a_tree_without_egg_info_is_refused_before_queueing(env, conf_dir, tmp_p
     import shutil as _shutil
 
     bare = tmp_path / "bare_repo"
+    # Whichever of these the checkout has: a tree stripped of `docs/` is still a tree this
+    # command has to refuse for the right reason.
     for item in ("wcfm", "conf", "tests", "docs", "gridutils"):
-        _shutil.copytree(REPO / item, bare / item, symlinks=True,
-                         ignore=_shutil.ignore_patterns("__pycache__"))
+        if (REPO / item).is_dir():
+            _shutil.copytree(REPO / item, bare / item, symlinks=True,
+                             ignore=_shutil.ignore_patterns("__pycache__"))
     for item in ("pyproject.toml", "README.md"):
         _shutil.copy2(REPO / item, bare / item)
 
     args = [a if a != str(REPO) else str(bare) for a in _args(conf_dir)]
     assert main(args) == 2
-    assert "wirecell_fm.egg-info" in capsys.readouterr().err
+    assert "wire_cell_fm.egg-info" in capsys.readouterr().err
 
 
 def test_overrides_are_quoted_individually(env, conf_dir):

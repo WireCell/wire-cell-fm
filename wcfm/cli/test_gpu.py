@@ -13,7 +13,7 @@ seconds for a reason visible from the login node wastes a queue slot:
 
 - the shared library directories exist. Nothing is installed by the job, and `getenv=False`
   leaves `uv` off the worker's PATH.
-- the tree packages, in particular that `wirecell_fm.egg-info` is there, without which no
+- the tree packages, in particular that `wire_cell_fm.egg-info` is there, without which no
   `model=` preset resolves on the worker.
 
 The tests the job runs are the ones in the tree at submit time: they are packaged into an

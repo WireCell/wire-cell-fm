@@ -1,4 +1,4 @@
-# wirecell-fm
+# wire-cell-fm
 
 A training framework for Wire-Cell foundation model (`wcfm`), and a model that runs on
 it. Self-supervised pretraining on LArTPC detector images, with an offline probe suite to
@@ -25,15 +25,15 @@ in the config.
 
 ## The packages
 
-| Package | Lines | What it is |
-|---|---|---|
-| `wcfm/config/` | 550 | Typed dataclasses that give Hydra its defaults, the ConfigStore registration, and where a run's files go. The dataclasses are never instantiated — Hydra merges them into a `DictConfig` and they are gone |
-| `wcfm/data/` | 1,300 | `Batch(voxels, meta)` from three interchangeable readers: `direct` (the production tree), `packed` (one `.npz` in RAM), `sharded` (streamed HDF5 shards) |
-| `wcfm/engine/` | 1,600 | The `TrainingModule` contract, the training loop on Lightning Fabric, optimizer and schedules, checkpoints, preemption |
-| `wcfm/metrics/` | 970 | Collectors with a declared cadence, append-only JSONL, and no collectives inside `compute()`, so a data-dependent branch cannot hang a job |
-| `wcfm/model/` | 2,800 | Backbone, augment stage, loss terms, and the `SslModule` that implements `TrainingModule` |
-| `wcfm/eval/` | 3,900 | Offline: extract features per checkpoint, pool, then the probe suite as a Condor DAG |
-| `wcfm/cli/` | 1,600 | Eight commands. Composition and submission live here, and nothing else is an entry point |
+| Package | What it is |
+|---|---|
+| `wcfm/config/` | Typed dataclasses that give Hydra its defaults, the ConfigStore registration, and where a run's files go. The dataclasses are never instantiated — Hydra merges them into a `DictConfig` and they are gone |
+| `wcfm/data/` | `Batch(voxels, meta)` from three interchangeable readers: `direct` (the production tree), `packed` (one `.npz` in RAM), `sharded` (streamed HDF5 shards) |
+| `wcfm/engine/` | The `TrainingModule` contract, the training loop on Lightning Fabric, optimizer and schedules, checkpoints, preemption |
+| `wcfm/metrics/` | Collectors with a declared cadence, append-only JSONL, and no collectives inside `compute()`, so a data-dependent branch cannot hang a job |
+| `wcfm/model/` | Backbone, augment stage, loss terms, and the `SslModule` that implements `TrainingModule` |
+| `wcfm/eval/` | Offline: extract features per checkpoint, pool, then the probe suite as a Condor DAG |
+| `wcfm/cli/` | Eight commands. Composition and submission live here, and nothing else is an entry point |
 
 Supporting trees: `conf/` is the Hydra config tree, `gridutils/` holds the Condor job scripts.
 

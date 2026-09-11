@@ -30,7 +30,7 @@ def hydra_all():
 
 
 def test_the_model_schema_plugin_is_discoverable():
-    """If this fails, `wirecell_fm.egg-info/` next to `wcfm/` is missing or stale: run
+    """If this fails, `wire_cell_fm.egg-info/` next to `wcfm/` is missing or stale: run
     `uv pip install -e . --no-deps` in the checkout. An rsync that excludes `*.egg-info`
     produces exactly this."""
     assert "model" in register_plugins()

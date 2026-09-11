@@ -11,7 +11,7 @@ framework free of a model import. `pyproject.toml` declares the one entry there 
     model = "wcfm.model.config:register"
 
 Entry points are read from package metadata, not from the source tree, so a checkout reached
-by `PYTHONPATH` needs the `wirecell_fm.egg-info/` an editable install writes beside `wcfm/`.
+by `PYTHONPATH` needs the `wire_cell_fm.egg-info/` an editable install writes beside `wcfm/`.
 Without it the model group simply does not exist and `model=` resolves to nothing.
 
 A plugin that fails to load is warned about and skipped, so a broken model package leaves some

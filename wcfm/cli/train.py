@@ -71,7 +71,7 @@ def explain_missing_model(exc: Exception, config_dir: Path) -> None:
     Shared with `wcfm submit`, since it is the same first-encounter message. The second case is
     the one that bites a checkout reached through PYTHONPATH: every file under `conf/model/`
     selects its typed schema from the ConfigStore (`defaults: [base_dino]`), and those nodes
-    arrive through the `wcfm.config_schemas` entry point, which needs the `wirecell_fm.egg-info/`
+    arrive through the `wcfm.config_schemas` entry point, which needs the `wire_cell_fm.egg-info/`
     an editable install writes next to `wcfm/`. Hydra's own words for that are "Could not find
     'model/term/base_dino'", which reads like a typo.
     """
@@ -85,7 +85,7 @@ def explain_missing_model(exc: Exception, config_dir: Path) -> None:
         print(
             "\nThe model config schema plugin did not load (wcfm.config_schemas -> "
             "wcfm.model.config:register), so no `model/*/base_*` node exists to compose onto. "
-            "Run `uv pip install -e . --no-deps` in the checkout so `wirecell_fm.egg-info/` "
+            "Run `uv pip install -e . --no-deps` in the checkout so `wire_cell_fm.egg-info/` "
             "exists next to `wcfm/`; an rsync that excludes `*.egg-info` produces this.",
             file=sys.stderr,
         )
