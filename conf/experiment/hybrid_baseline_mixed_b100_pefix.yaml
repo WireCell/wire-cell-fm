@@ -1,0 +1,47 @@
+# @package _global_
+#
+# This is an example experiment - a fully resolved configuration
+# running the "hybrid" objection (DINO with injection of masked pixels)
+# on the prod_jay_200k_mixed_sharded dataset, with a 100-epoch schedule.
+
+defaults:
+  # `override`, not a bare entry: `model` and `data` are already in conf/config.yaml's
+  # defaults list, so naming them again requires and override.
+  - override /model: hybrid
+  - override /data: prod_jay_200k_mixed_sharded
+  - _self_
+
+run:
+  name: wcfm_hybrid_b100
+  precision: 32-true
+  num_workers: 5        # the sharded reader partitions over world_size x num_workers
+  seed: 42
+  save_every: 10        # checkpoint every 10 epochs
+
+# No `data:` block: everything already matches prod_jay_200k_mixed_sharded
+
+optim:
+  epochs: 100           # see the warning above
+  lr: 1.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.04
+  weight_decay_end: 0.1 # schema default is 0.4
+  warmup_epochs: 10     # schema default is 1
+
+model:
+  backbone:
+    encoding_range: 320.0   # schema default is 125.0.
+  teacher:
+    momentum_start: 0.999   # schema default 0.996
+    momentum_end: 0.9999    # schema default 1.0
+  augment:
+    cropper:
+      n_global: 1           # schema default 2
+      n_local: 2            # schema default 4
+      global_scale: [0.4, 0.8]   # schema default [0.4, 1.0]
+    masker:
+      ratio: 0.5            # block masker
+  terms:
+    dino:
+      # score_injected: true comes from the hybrid preset, not repeated here.
+      weight: 1.0

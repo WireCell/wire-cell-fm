@@ -1,0 +1,16 @@
+# @package _global_
+# Plain DINO: masked and cropped student views distilled from an EMA teacher, the removed
+# coordinates are NOT reinjected: they are simply absent from the student's output and the
+# intersection drops them.
+defaults:
+  - /model/module@model: ssl
+  - /model/backbone: attn_mae
+  - /model/teacher: ema
+  - /model/augment: crop_mask
+  - /model/normalize: log
+  - /model/term@model.terms.dino: dino
+  - _self_
+model:
+  terms:
+    dino:
+      score_injected: false

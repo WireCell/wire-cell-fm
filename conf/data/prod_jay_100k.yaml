@@ -1,0 +1,21 @@
+# The 100k numu original production by Jay (2026-06-11).
+# These are the original files, read directly one by one, without sharding or packing.
+#
+# This is a legacy configuration, provided only as an example of the "direct" option
+backend: direct
+datadir: /gpfs01/lbne/users/bnayak/cffm-data/prod-jay-100k-truth-2026-06-11
+sharded_dir: ""
+packed_path: ""
+buffer_size: 3000 # ignored here
+n_subset: -1
+global_batch_size: 100
+image_h: 1500
+image_w: 1050
+apa: 0
+view: W
+use_log_transform: true
+feat_min_val: 3.75
+feat_max_val: 83861.2
+splits:
+  id: in-sample
+  train_frac: 1.0

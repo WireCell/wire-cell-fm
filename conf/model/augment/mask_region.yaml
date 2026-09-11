@@ -1,0 +1,6 @@
+# One view, the whole image, whole grid cells wiped. 
+# RegionMasker for MAE/occupancy objective: the grid is defined on the canvas, 
+# so this cannot be combined with cropping.
+defaults:
+  - base_augment
+  - /model/masker@masker: region

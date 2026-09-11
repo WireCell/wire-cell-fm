@@ -1,0 +1,16 @@
+# Simple launch configuration for one GPU on one node.
+# This is the default job with 1 GPU.
+
+# `devices` is the one place the rank count (number of GPU devices) is stated: 
+# it sets Fabric's world and  Condor's equest_gpus, and how the job starts
+# if >1, jobs runs under `torchrun --standalone --nnodes=1 --nproc_per_node=<devices>`
+# in this simple case, it launches a single process.
+devices: 1
+
+num_nodes: 1    # reaches Fabric(num_nodes=...), keep 1 (no multi-node support yet)
+strategy: ddp   # inert at one GPU: trainer.py:122 forces "auto". Left as the default
+
+# Also inert at one GPU -- these are DDPStrategy kwargs and no DDPStrategy is built here.
+# left as the default for multi-GPU runs, where they are strong requirements.
+find_unused_parameters: true
+static_graph: false

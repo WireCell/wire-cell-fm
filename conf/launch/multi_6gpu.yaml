@@ -1,0 +1,14 @@
+# Launch configuration for six GPUs on one node, under DDP.
+# Submit with `wcfm submit ... launch=multi_6gpu`
+
+# `devices` is the one place the rank count (number of GPU devices) is stated: 
+# it sets Fabric's world and  Condor's equest_gpus, and how the job starts
+# if >1, jobs runs under `torchrun --standalone --nnodes=1 --nproc_per_node=<devices>`
+devices: 6
+
+num_nodes: 1    # reaches Fabric(num_nodes=...), keep 1 (no multi-node support yet)
+strategy: ddp   # builds a real DDPStrategy
+
+# These are strong requirements for DDP, do not change
+find_unused_parameters: true
+static_graph: false

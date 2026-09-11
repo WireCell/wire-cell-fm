@@ -1,0 +1,6 @@
+# The sparse MinkUNet with an attention bottleneck and a `masked` token at each skip.
+# This is the primary backbone for Wire-Cell FM every run uses.
+
+# Values not listed here are the schema defaults in wcfm/model/config.py.
+defaults:
+  - base_minkunet

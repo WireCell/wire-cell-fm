@@ -1,0 +1,20 @@
+# The composition root. Framework groups only. -- `model` is one group and the framework never
+# names a model type; see wcfm/config/schema.py.
+defaults:
+  - base_config          # the typed schema registered by wcfm.config.store
+  - run: default
+  - data: prod_jay_200k_mixed_sharded
+  - optim: adamw_cosine
+  - metrics: default
+  - launch: single_gpu
+  - model: mae
+  - _self_
+
+hydra:
+  job:
+    # The Condor job manages its own working directory and rsync layout; Hydra changing cwd
+    # breaks it. This must stay false.
+    chdir: false
+  run:
+    dir: .
+  output_subdir: null

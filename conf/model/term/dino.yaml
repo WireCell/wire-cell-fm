@@ -1,0 +1,5 @@
+# Per-pixel cross-entropy against the EMA teacher. 
+# This is loss term for the DINO objective.
+# if score_injected: true, it becomes hybrid (DINO + cross-entropy over masked pixels).
+defaults:
+  - base_dino

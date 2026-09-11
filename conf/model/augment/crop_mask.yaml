@@ -1,0 +1,7 @@
+# Crops, then a mask on every student view.
+# The `@cropper` / `@masker` packages are relative to this file's own package (model.augment),
+# so the parts land at model.augment.cropper and model.augment.masker.
+defaults:
+  - base_augment
+  - /model/cropper@cropper: default
+  - /model/masker@masker: block

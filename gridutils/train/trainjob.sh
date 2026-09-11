@@ -1,0 +1,219 @@
+#!/bin/bash
+#
+# `wcfm train` on a Condor worker. Submitted by `wcfm submit`.
+#
+# Args (positional):
+#   $1 archive   -- basename of the transferred repo tarball (unpacked into scratch)
+#   $2 pyenv     -- the cluster uv venv (torch/warpconvnet stack)
+#   $3 outdir    -- run directory on GPFS; scratch is rsynced here
+#   $4 run_name  -- must match `run.name` in the overrides
+#   $5 cache_dir -- base for the warpconvnet benchmark cache and the data index
+#   $6 devices   -- `launch.devices` from the resolved config; the rank count
+#   $7+ ...      -- Hydra overrides, passed through to `wcfm train`
+#
+# I/O strategy: write everything to $_CONDOR_SCRATCH_DIR (fast local disk) and
+# rsync to GPFS, so partial outputs survive failure and preemption.
+# `run.output_root` points at scratch.
+#
+# NB: this file is a COPY, staged beside the archive at submit time, and Condor transfers it
+# here like any other input. Editing the checkout's copy cannot reach a queued or running job.
+
+set -uo pipefail
+
+# --- the repo arrives as an archive ------------------------------------------
+# The submitting command packaged this tree (wcfm/cli/jobpack.py) and Condor transferred it here
+# when the job started. Transferred files land in the job's scratch directory, which is also
+# where we were started, so `$1` is a bare filename.
+#
+# Unpacked into `repo/` rather than over the scratch root, so that the cwd still holds nothing
+# importable: `python -m wcfm.cli` puts the cwd first on sys.path, ahead of PYTHONPATH, and
+# cluster 2261 imported a login-node checkout exactly that way.
+repo_archive=$(readlink -f "$1")
+repodir="${_CONDOR_SCRATCH_DIR:-$PWD}/repo"
+mkdir -p "$repodir"
+tar xzf "$repo_archive" -C "$repodir" || { echo "FATAL: cannot unpack ${repo_archive}"; exit 3; }
+[ -d "${repodir}/wcfm" ] && [ -d "${repodir}/wirecell_fm.egg-info" ] || {
+  echo "FATAL: ${repo_archive} has no wcfm/ + wirecell_fm.egg-info. The model's config schemas"
+  echo "come from an entry point read from that metadata; without it no model= preset resolves."
+  exit 3
+}
+pyenv=$2
+outdir=$3
+run_name=$4
+cache_dir=$5
+devices=$6
+shift 6
+overrides=("$@")
+
+# `devices` is `launch.devices` from the resolved config -- the ONE place the rank count is
+# stated. `wcfm submit` composed the config and wrote it into the .sub alongside
+# `request_gpus`, so the two cannot disagree by construction.
+#
+# What CAN still differ is what Condor actually granted, which is what CUDA_VISIBLE_DEVICES
+# says. That is a real failure and it is fatal here rather than absorbed: launching
+# `--nproc_per_node` from the granted count instead would silently run a different job than
+# the config describes, and launching from the config on a smaller allocation puts two ranks
+# on one device. The engine repeats the check against WORLD_SIZE (trainer.py::build_fabric)
+# because torchrun is not the only way in.
+granted=$(awk -F, '{print NF}' <<< "${CUDA_VISIBLE_DEVICES:-}")
+if [ "${granted}" -ne "${devices}" ]; then
+  echo "FATAL: launch.devices=${devices} but Condor granted ${granted} GPU(s)"
+  echo "  CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+  echo "  request_gpus is derived from launch.devices, so this means the allocation changed"
+  echo "  under the job, not that the config is wrong. Resubmit."
+  exit 4
+fi
+ngpus=${devices}
+
+echo "Running ${CLUSTER_ID:-?}.${JOB_ID:-?} on $(hostname)"
+echo "  run_name=${run_name}  ngpus=${ngpus} (launch.devices, granted ${granted})"
+echo "  repodir=${repodir}"
+echo "  outdir=${outdir}"
+echo "  overrides=${overrides[*]}"
+echo ""
+
+# --- NCCL on PCIe-only L40S ---------------------------------------------------
+# sgpu0003/4 have no NVLink and their GPU-to-GPU P2P transport hangs at this driver/NCCL
+# level: the group initialises, the startup broadcasts succeed, and the first AllReduce never
+# returns. Forcing the host shared-memory transport fixes it at no real cost. Harmless on one
+# GPU, where no collective is issued.
+export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
+export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+
+# The benchmark cache is copied to local scratch and merged back at the end, so a job does not
+# pay warpconvnet's autotuning on every start and new op shapes reach later jobs. rsync writes
+# each file to a temp name and renames, so concurrent merges from several jobs are safe.
+wp_cache_gpfs="${cache_dir}/warpconvnet"
+wp_cache="${_CONDOR_SCRATCH_DIR}/warpconvnet"
+data_cache="${cache_dir}/data"
+mkdir -p "$wp_cache_gpfs" "$data_cache"
+cp -r "$wp_cache_gpfs" "$wp_cache" 2>/dev/null || mkdir -p "$wp_cache"
+export WARPCONVNET_USE_FP16_ACCUM=false
+export WARPCONVNET_BENCHMARK_CACHE_DIR="$wp_cache"
+export PYTHONUNBUFFERED=1
+echo "  NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE}  WARPCONVNET_BENCHMARK_CACHE_DIR=${wp_cache}"
+
+source "${pyenv}/bin/activate"
+
+# Nothing is installed by this job, and nothing may be. `getenv=False` leaves ~/.local/bin off
+# the worker's PATH so there is no uv here, the cluster venv has no pip, and a `--target`
+# install without --no-deps drops a SECOND torch that shadows the pinned 2.10.0+cu128 on
+# PYTHONPATH. lightning-fabric lives once on GPFS instead, and the repo is reached by
+# PYTHONPATH.
+WCFM_LIBS="${WCFM_LIBS:-/gpfs01/lbne/users/fm/${USER}/wcfm-libs}"
+# hydra and omegaconf are RUNTIME dependencies of `wcfm train`, not test dependencies: the
+# config is composed on the worker, so a job without them dies on `import hydra` before it
+# trains anything. The install lines below are --no-deps on purpose, because a resolver must
+# never touch the pinned torch (pyproject.toml). antlr4 and PyYAML are the two members of
+# hydra's and omegaconf's closure the uvenv does not already carry.
+for pkg in lightning_fabric hydra omegaconf; do
+  if [ ! -d "${WCFM_LIBS}/${pkg}" ]; then
+    echo "FATAL: no ${pkg} at ${WCFM_LIBS}. Build the shared runtime libs once:"
+    echo "  uv pip install --python ${pyenv}/bin/python --target ${WCFM_LIBS} --no-deps \\"
+    echo "      'lightning-fabric>=2.6,<3' 'hydra-core>=1.3.6,<1.4' 'omegaconf>=2.3.1,<2.4' \\"
+    echo "      'antlr4-python3-runtime==4.9.3' 'PyYAML>=6'"
+    exit 3
+  fi
+done
+export PYTHONPATH="${WCFM_LIBS}:${repodir}${PYTHONPATH:+:$PYTHONPATH}"
+
+# Scratch is where we already are, but say it: nothing between here and the trainer may leave
+# the job somewhere importable. See the unpack block at the top for why that matters.
+cd "${_CONDOR_SCRATCH_DIR:-/tmp}"
+
+
+python - <<'PY' || { echo "FATAL: wrong torch on the path"; exit 3; }
+import torch, lightning_fabric
+assert "uvenv" in torch.__file__, f"torch came from {torch.__file__}, not the pinned venv"
+print(f"torch {torch.__version__} | lightning-fabric {lightning_fabric.__version__} | "
+      f"cuda {torch.cuda.is_available()} devices {torch.cuda.device_count()}")
+PY
+
+# `run.output_root` is scratch; the engine creates <root>/<run_name>/{checkpoints,debug,
+# probes,features,metrics} itself, so the rsync is one directory.
+#
+# $scratch_run must NOT be pre-created here. A mkdir in this script makes the directory exist
+# whether or not the engine wrote to it, so a run whose name this script computed differently
+# from the engine's -- `wcfm submit --smoke` appends a suffix in the submit process only --
+# rsyncs the empty one it just made. rsync succeeds, `|| true` has nothing to swallow, the job
+# exits 0 and every output is thrown away. Let the engine create it, and treat its absence as
+# the failure it is.
+scratch_root="${_CONDOR_SCRATCH_DIR}/runs"
+scratch_run="${scratch_root}/${run_name}"
+mkdir -p "$scratch_root"
+
+sync_back() {
+  if [ ! -d "$scratch_run" ]; then
+    echo "WARNING: nothing at ${scratch_run} to sync. The engine writes <output_root>/<run.name>," \
+         "so run_name=${run_name} disagrees with the composed run.name. Present under" \
+         "${scratch_root}: $(ls "$scratch_root" 2>/dev/null | tr '\n' ' ')"
+    return 1
+  fi
+  echo "Syncing ${scratch_run} -> ${outdir}"
+  mkdir -p "$outdir"
+  rsync -a "${scratch_run}/" "${outdir}/" || echo "WARNING: rsync of the run directory failed"
+  rsync -a "${wp_cache}/" "${wp_cache_gpfs}/" || true
+}
+
+# Periodic mid-run sync. Checkpoints land in scratch as soon as they are written, but via the
+# exit path alone they would only reach GPFS when the job ends -- invisible to monitoring and
+# probing for the whole run. A checkpoint caught mid-write transfers truncated and is repaired
+# on the next tick, so treat one on GPFS as settled once a later one exists.
+SYNC_INTERVAL="${SYNC_INTERVAL:-300}"
+( while sleep "$SYNC_INTERVAL"; do sync_back; done ) &
+sync_loop_pid=$!
+
+if [ "${ngpus:-1}" -gt 1 ]; then
+  echo "Executing wcfm train under torchrun (${ngpus} ranks) ..."
+  launcher=(torchrun --standalone --nnodes=1 --nproc_per_node="$ngpus" -m wcfm.cli)
+else
+  echo "Executing wcfm train ..."
+  launcher=(python -u -m wcfm.cli)
+fi
+
+# --- preemption ---------------------------------------------------------------
+# The trainer is backgrounded and the handler WAITS for it. `PreemptionGuard` writes
+# `latest.pt` on SIGTERM at the next step boundary, so a handler that rsynced on receipt would
+# copy a checkpoint mid-write and `--resume auto` would then fail on it. Bash runs the trap
+# while blocked in `wait`, and a second `wait` on the same pid returns the child's real status.
+#
+# The signal goes to torchrun rather than to the ranks: torchrun owns rank lifetimes and
+# forwards it to its workers itself.
+# `run.output_root` -> local scratch (rsynced back by sync_back); `data.cache_dir` -> the
+# GPFS path prepared above, because the DirectDataset index is worth keeping between jobs and
+# scratch is wiped. Both are appended LAST so they win over anything in conf/ or on the
+# submit line. cache_dir has to be one of them: left to the composed config it is whatever
+# path that config happens to name, which is not necessarily this user's.
+"${launcher[@]}" train "${overrides[@]}" \
+  "run.output_root=${scratch_root}" "data.cache_dir=${data_cache}" &
+trainer_pid=$!
+
+on_term() {
+  echo "SIGTERM received; forwarding to the trainer and waiting for it to checkpoint"
+  kill -TERM "$trainer_pid" 2>/dev/null || true
+  wait "$trainer_pid"
+  rc=$?
+  echo "trainer exited rc=${rc}; latest.pt is settled, syncing"
+  kill "$sync_loop_pid" 2>/dev/null || true
+  sync_back
+  exit 143
+}
+trap on_term SIGTERM
+
+wait "$trainer_pid"
+rc=$?
+kill "$sync_loop_pid" 2>/dev/null || true
+sync_back
+synced=$?
+
+if [ "$rc" -ne 0 ]; then
+  echo "Training FAILED rc=${rc}"
+elif [ "$synced" -ne 0 ]; then
+  # The trainer succeeded and the outputs are gone, which is worse than a crash: it is a
+  # green job with nothing to show. Do not report it as a success.
+  echo "Training FAILED: the trainer exited 0 but produced nothing at ${scratch_run}"
+  rc=4
+else
+  echo "Training complete!"
+fi
+exit "$rc"

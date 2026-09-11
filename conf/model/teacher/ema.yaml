@@ -1,0 +1,5 @@
+# A cosine momentum schedule over the run, from `momentum_start` to `momentum_end`. The
+# schedule length is `total_iters`, which the engine hands the model at the first step.
+# Defaults are set in the schema wcfm/model/config.py.
+defaults:
+  - base_ema

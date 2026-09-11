@@ -1,0 +1,7 @@
+# Applied inside training_step, in place, before the masker.
+# The constants are percentiles of the production's charge distribution and live on `data`.
+defaults:
+  - base_log
+min_val: ${data.feat_min_val}
+max_val: ${data.feat_max_val}
+enabled: ${data.use_log_transform}

@@ -1,0 +1,51 @@
+# The everyday metrics configuration: every collector that is effectively free, and the two
+# that are not configured but left off. Between minimal (throughput only) and full.
+#
+# Cadence is per collector and is either an integer number of optimizer steps, the string
+# `step` (every step), `epoch` (once per epoch), or 0, which means "configured but never
+# fires". Every collector below can be retuned with a command-line override, e.g.
+#   wcfm train metrics=full metrics.collectors.spectrum.cadence=200
+
+defaults:
+  - minimal
+collectors:
+
+  # Samples/s, voxels/s, the data-wait fraction, and peak memory. 
+  throughput:
+    _target_: wcfm.metrics.collectors.Throughput
+    cadence: step
+
+  # Gradient norm and grad-to-parameter ratio per group of the model
+  # Biases and norm parameters are excluded by default (include_bias_and_norm: false).
+  # Note: these are read after the optimizer step, so with `optim.clip_grad_norm > 0` they are
+  # POST-clip. The pre-clip total is the engine's own `grad_norm` column.
+  gradnorm:
+    _target_: wcfm.metrics.collectors.GradNorm
+    cadence: 100. #every 100 steps
+
+  # Participation ratio, RankMe, top-k eigenvalues, condition number, variance and row-norm order statistics.
+  # This is the collapse detector, i.e. a representation folding to a few directions.
+  #
+  # Rank-0 local by design, so every emission carries `n_rows`: a participation ratio over
+  # 200 rows and one over 65 536 are not comparable.
+  spectrum:
+    _target_: wcfm.metrics.collectors.Spectrum
+    cadence: 500 # every 500 steps
+    max_rows: 65536
+
+  # Full covariance matrix and a feature sample, written as .npy beside the stream.
+  # Rank 0 only, since it calls np.save itself and every rank would race on one GPFS path.
+  # DISABLED.
+  arrays:
+    _target_: wcfm.metrics.collectors.ArrayDump
+    cadence: 0      # off: see the header
+
+  # Do the objective's terms pull the shared parameters the same way? Emits each term's
+  # gradient norm, its share of the total, and the pairwise cosines and sign-conflict
+  # fractions over the backbone. 
+  # A negative cosine means the objective is fighting itself; a sign-conflict
+  # fraction near 0.5 means the terms are merely unrelated.
+  # DISABLED.
+  termgrad:
+    _target_: wcfm.metrics.collectors.TermGrad
+    cadence: 0      # off: see the header

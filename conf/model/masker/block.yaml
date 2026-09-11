@@ -1,0 +1,4 @@
+# Windows around random active voxels.
+# Values are set in the schema wcfm/model/config.py.
+defaults:
+  - base_block

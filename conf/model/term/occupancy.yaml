@@ -1,0 +1,5 @@
+# Focal BCE over the masker's enumerated occupancy candidates, read at the half-resolution
+# decoder output. Needs model/masker=region with build_candidates: true.
+# This is the loss term for the occupancy objective.
+defaults:
+  - base_occupancy

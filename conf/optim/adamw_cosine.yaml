@@ -1,0 +1,16 @@
+# AdamW with a cosine schedule on the two quantities the optimizer holds.
+#
+# name, epochs, lr, min_lr, weight_decay, weight_decay_end, warmup_epochs, clip_grad_norm,
+# accumulate_grad_batches and freeze_backbone all default from wcfm/config/schema.py
+schedules:
+  lr:
+    _target_: wcfm.engine.optim.CosineScheduler
+    base_value: ${optim.lr}
+    final_value: ${optim.min_lr}
+    warmup_epochs: ${optim.warmup_epochs}
+    warmup_value: 0.0
+  weight_decay:
+    _target_: wcfm.engine.optim.CosineScheduler
+    base_value: ${optim.weight_decay}
+    final_value: ${optim.weight_decay_end}
+    warmup_epochs: 0

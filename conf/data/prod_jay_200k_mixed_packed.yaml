@@ -1,0 +1,18 @@
+# The mixed (numu+nueswap) 200k production from Jay (2026-06-11), apa 0 / view W only
+# This is the default production, but read through the packed reader.
+#
+# From the tree's own metadata.json:
+#   n_samples 199870, n_shards 200, shard_size 1000, seed 42
+#   pixel_truth true, extra_truth true, label_format classes7_v1
+#   classes: Background, Track, Shower, Michel, DeltaRay, Blip, Other
+#
+# Per-pixel truth is present but still opt-in (data.return_pixel_truth=true): HDF5
+# decompresses those datasets on every read.
+
+# inherit from the sharded reader, but override the backend and packed_path
+defaults:
+  - prod_jay_200k_mixed_sharded
+
+backend: packed
+packed_path: /gpfs01/lbne/users/fm/cffm-data/packed/prod-jay-2026-06-11_mixed_apa0W.npz
+sharded_dir: ""

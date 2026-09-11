@@ -1,0 +1,4 @@
+# L1 on the log-charge masking removed, at the injected coordinates.
+# This is the loss term for the MAE objective.
+defaults:
+  - base_charge

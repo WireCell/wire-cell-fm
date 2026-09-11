@@ -1,0 +1,15 @@
+# @package _global_
+# DINO with injection at the masked coordinates: the backbone puts a `masked` token back where
+# the masker removed a pixel, so the same-index pair becomes a prediction task and is kept.
+defaults:
+  - /model/module@model: ssl
+  - /model/backbone: attn_mae
+  - /model/teacher: ema
+  - /model/augment: crop_mask
+  - /model/normalize: log
+  - /model/term@model.terms.dino: dino
+  - _self_
+model:
+  terms:
+    dino:
+      score_injected: true

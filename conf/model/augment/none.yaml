@@ -1,0 +1,4 @@
+# No augmentation at all. 
+# Note: dino objective will refuse this, each view compares to itself.
+defaults:
+  - base_augment

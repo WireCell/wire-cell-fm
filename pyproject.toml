@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wirecell-fm"
+version = "0.0.1"
+description = "A training framework for sparse-detector foundation models, and a model that runs on it"
+requires-python = ">=3.11,<3.12"
+readme = "README.md"
+# The GPU stack -- torch, warpconvnet, flash-attn, torch-scatter -- is deliberately not declared
+# here. It is built once from pinned wheels and this file must never resolve it.
+dependencies = [
+    "hydra-core>=1.3.6,<1.4",
+    "omegaconf>=2.3.1,<2.4",
+    "lightning-fabric>=2.6,<3",
+    "numpy",
+    "h5py",
+    "pyyaml",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+wcfm = "wcfm.cli.__main__:main"
+
+# How the model axis reaches a framework that may not import it. Entry points are read from
+# package metadata, so a checkout used via PYTHONPATH needs the `wirecell_fm.egg-info/` an
+# editable install writes beside `wcfm/`; without it no `model=` option exists at all.
+[project.entry-points."wcfm.config_schemas"]
+model = "wcfm.model.config:register"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["wcfm*"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# No backbone forward is CPU-testable, so `gpu` and `distributed` have a named trigger,
+# `wcfm test --gpu`, and are required before a stage lands.
+markers = [
+    "gpu: needs a CUDA device",
+    # Ranks, not devices: DDP's reduction is backend-independent, so two CPU ranks over gloo
+    # test the same thing. Run with `wcfm test --dist-cpu`.
+    "distributed: needs 2+ ranks (torchrun); runs over gloo on CPU or nccl on GPU",
+    "needs_data: reads the production under /gpfs01",
+    "stack: needs the GPU software stack importable (no device required)",
+]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = [".", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Pure numpy geometry carrying the WCT projection, unmodified. Drop the exemption when it is
+# actually edited.
+"wcfm/data/wire_geometry.py" = ["E501", "E701", "E702", "I001", "UP", "B"]

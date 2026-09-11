@@ -1,0 +1,7 @@
+# Every knob and its default lives on RunConfig in wcfm/config/schema.py -- name, seed,
+# output_root, num_workers, precision, deterministic, resume, save_every, save_every_minutes,
+# save_at. A default is written in exactly one place, so this preset overrides none of them.
+#
+# Fix a value for a whole family of runs by setting it here, or per run on the CLI:
+#   wcfm train model=dino run.name=my_run run.save_at=[10,25,50]
+{}

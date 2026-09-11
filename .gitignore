@@ -1,0 +1,18 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+outputs/
+multirun/
+runs/
+sweeps/
+*.pt
+!tests/fixtures/**/*.pt
+
+# The wire-geometry cache. `WireGeometry.load` parses the wires JSON and writes this beside
+# the module on first use, so it is build output, not source -- and it is 744 KB of it. The
+# old repo ignored its copy for the same reason (`/data/*.npz`). Delete it to force a reparse.
+wcfm/data/wire_geometry_*.npz

@@ -1,0 +1,5 @@
+# One view, the whole image, masked.
+# This is the BlockMasker version, compatible with DINO objective.
+defaults:
+  - base_augment
+  - /model/masker@masker: block

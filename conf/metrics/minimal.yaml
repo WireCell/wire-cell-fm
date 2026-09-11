@@ -1,0 +1,12 @@
+# Metrics are always on and collected.
+# This is the minimal configuration, with only throughput collection.
+# It is the default for all runs.
+#
+# step_cadence and max_record_bytes default on MetricsConfig
+# (wcfm/config/schema.py) and are not restated.
+
+collectors:
+  # Samples/s, voxels/s, the data-wait fraction, and peak memory...
+  throughput:
+    _target_: wcfm.metrics.collectors.Throughput
+    cadence: step

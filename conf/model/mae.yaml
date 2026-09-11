@@ -1,0 +1,28 @@
+# @package _global_
+# MAE only, no teacher: predict the charge at the pixels masking removed, and
+# whether each enumerated candidate was occupied at all.
+defaults:
+  - /model/module@model: ssl
+  - /model/backbone: attn_mae
+  - /model/teacher: none
+  - /model/augment: mask_region
+  - /model/normalize: log
+  - /model/term@model.terms.charge: charge
+  - /model/term@model.terms.occupancy: occupancy
+  - _self_
+model:
+  backbone:
+    # Two token sets are injected in the skip lines: `masked` for the charge term's removed pixels,
+    # `candidate` for the occupancy question. Done at both resolution.
+    # (it's up to the backbone the loss terms to use them or not) 
+    inject_roles: [masked, candidate]
+  augment:
+    masker:
+      build_candidates: true
+      # The candidate set is overwhelmingly empty and the term refuses to run uncapped.
+      neg_per_pos: 3.0
+  terms:
+    charge:
+      weight: 0.1
+    occupancy:
+      weight: 1.0

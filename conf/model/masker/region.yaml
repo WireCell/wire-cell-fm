@@ -1,0 +1,8 @@
+# Whole cells of a grid over the canvas.
+# The grid is defined on the canvas, so the canvas comes from the production.
+# (no compatible with cropping, for now)
+# Defaults are set in the schema wcfm/model/config.py.
+defaults:
+  - base_region
+image_w: ${data.image_w}
+image_h: ${data.image_h}

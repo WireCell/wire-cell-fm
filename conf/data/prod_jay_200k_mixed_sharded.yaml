@@ -1,0 +1,40 @@
+# The mixed (numu+nueswap) 200k production from Jay (2026-06-11), apa 0 / view W only
+# This is the default production, read through the sharded reader.
+#
+# From the tree's own metadata.json:
+#   n_samples 199870, n_shards 200, shard_size 1000, seed 42
+#   pixel_truth true, extra_truth true, label_format classes7_v1
+#   classes: Background, Track, Shower, Michel, DeltaRay, Blip, Other
+#
+# Per-pixel truth is present but still opt-in (data.return_pixel_truth=true): HDF5
+# decompresses those datasets on every read.
+
+backend: sharded
+sharded_dir: /gpfs01/lbne/users/fm/cffm-data/shards_prod-jay-2026-06-11_mixed_apa0W
+datadir: ""
+packed_path: ""
+global_batch_size: 100
+
+# Samples were shuffled when the shards were written, but the reader still assembles its own batches
+# The shuffle buffer is the pool it draws batches from. Note this is a refill threshold, a new 
+# shard is loaded while len(buffer) < buffer_size. This size is a trade-off between how much data
+# to keep loaded vs the randomness of the batch draw.
+# Note: each dataloader worker keeps its own buffer, not each node or each rank.
+buffer_size: 3000
+
+# Production constants
+image_h: 1500
+image_w: 1050
+apa: 0
+view: W
+
+# normalization
+use_log_transform: true
+feat_min_val: 3.75
+feat_max_val: 83861.2
+
+# Data splits: currently no validation or test splits, just train.
+# The sharded reader will read all shards in the directory.
+splits:
+  id: in-sample
+  train_frac: 1.0

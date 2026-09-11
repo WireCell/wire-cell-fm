@@ -1,0 +1,6 @@
+# This is the base cropping algorithm. Required by the DINO objective.
+# Size of images is taken from the data configuration.
+defaults:
+  - base_cropper
+image_w: ${data.image_w}
+image_h: ${data.image_h}
