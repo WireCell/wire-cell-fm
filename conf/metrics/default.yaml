@@ -21,7 +21,7 @@ collectors:
   # POST-clip. The pre-clip total is the engine's own `grad_norm` column.
   gradnorm:
     _target_: wcfm.metrics.collectors.GradNorm
-    cadence: 100. #every 100 steps
+    cadence: 100  # every 100 steps
 
   # Participation ratio, RankMe, top-k eigenvalues, condition number, variance and row-norm order statistics.
   # This is the collapse detector, i.e. a representation folding to a few directions.

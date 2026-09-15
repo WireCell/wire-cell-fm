@@ -1,0 +1,74 @@
+# @package _global_
+#
+# The hybrid objective (DINO with injection at the masked coordinates) on the
+# prod_jay_200k_mixed_sharded production, 100 epochs: six ranks,
+# per-rank batch 100, lr 6e-4. Metrics are the full collector set bar two, disabled below.
+#
+#   WCFM_REQUEST_MEMORY=64000 WCFM_REQUEST_CPUS=24 \
+#     wcfm submit +experiment=hybrid_ddp6_eb600
+#
+# The two variables are not config keys: `wcfm submit` reads them from the environment
+# and otherwise asks Condor for 32000 MB and 4 CPUs, which is four CPUs for the 24
+# dataloader workers `launch.devices` x `run.num_workers` starts.
+#
+# Everything not set below is a schema default.
+
+defaults:
+  # `override`, not a bare entry: each of these is already in conf/config.yaml's defaults
+  # list, so naming one again requires an override.
+  - override /model: hybrid
+  - override /data: prod_jay_200k_mixed_sharded
+  - override /launch: multi_6gpu
+  - override /metrics: full
+  - _self_
+
+run:
+  name: wcfm_hybrid_ddp6_eb600
+  precision: 32-true
+  num_workers: 4        # the sharded reader partitions over world_size x num_workers; 6 x 4
+                        # matches the 24 CPUs the job asks for
+  seed: 42
+  save_every: 10        # ep10..100 by 10, the epochs the probe suite is read at
+
+data:
+  # Global, across all six ranks: io.per_rank_batch_size divides it by launch.devices, giving
+  # the per-rank 100 the baseline ran. 100 here would be per-rank 16 and would not divide.
+  global_batch_size: 600
+
+optim:
+  epochs: 100
+  lr: 6.0e-4            # scaled with the effective batch; schema default is 1e-4
+  min_lr: 6.0e-6        # schema default is 1e-6
+  weight_decay: 0.04
+  weight_decay_end: 0.1 # schema default is 0.4
+  warmup_epochs: 10     # schema default is 1
+
+metrics:
+  collectors:
+    # This objective has one term, so `TermGrad` has nothing to compare: it would emit
+    # `n_terms=1`, `norm/dino` and `share/dino=1.0`, no cosine and no conflict fraction, and
+    # pay an extra `autograd.grad` over the backbone for them. `ArrayDump`'s covariance is
+    # what `Spectrum` already reduces to participation ratio, RankMe and the eigenvalues.
+    # 0 is "configured but never fires", so both stay in the stream's schema.
+    termgrad:
+      cadence: 0
+    arrays:
+      cadence: 0
+
+model:
+  backbone:
+    encoding_range: 320.0   # schema default is 125.0
+  teacher:
+    momentum_start: 0.999   # schema default 0.996
+    momentum_end: 0.9999    # schema default 1.0
+  augment:
+    cropper:
+      n_global: 1           # schema default 2
+      n_local: 2            # schema default 4
+      global_scale: [0.4, 0.8]   # schema default [0.4, 1.0]
+    masker:
+      ratio: 0.5            # block masker, 5x5 windows from the schema default
+  terms:
+    dino:
+      # score_injected: true comes from the hybrid preset, not repeated here.
+      weight: 1.0
