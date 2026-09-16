@@ -10,10 +10,15 @@ carries the index of names actually written, so a reader can tell "never measure
 run" from "measured, and it was zero". A sentinel value in the column cannot carry that
 difference.
 
-Resume truncates. A run that resumes from epoch N re-writes the steps from N onward, so on
-open the writer drops a trailing partial line and every record at or beyond the resume step.
-Without that a resumed run's stream holds two records for those steps and a plot silently
+Resume truncates. A run that resumes from epoch N re-writes the steps from N onward, so on open
+the writer drops a trailing partial line and the records the resumed run is about to write
+again. Without that a resumed run's stream holds two records for those steps and a plot silently
 averages the pre-eviction and post-eviction values.
+
+The boundary differs by stream, because they mark a step differently. A step record carries the
+index of the step about to run, so one at the resume step is rewritten and goes. An epoch record
+carries the step count after that epoch closed, so one at the resume step belongs to an epoch
+that finished before the checkpoint, is never written again, and is kept.
 """
 
 from __future__ import annotations
@@ -57,8 +62,15 @@ class MetricsWriter:
             # beyond the resume point. Otherwise a reader polling the directory in that
             # window sees the pre-eviction tail as if it were current.
             if resume_step is not None:
-                for stream in STREAMS:
-                    self._truncate(self.dir / f"{stream}.jsonl", resume_step)
+                # The two streams mark a step differently, so the boundary record is kept on
+                # one and dropped on the other. A step record carries the index of the step
+                # about to run, so one at `resume_step` is the first thing the resumed run
+                # rewrites. An epoch record carries the step count *after* that epoch closed,
+                # so one at `resume_step` describes an epoch that finished before the
+                # checkpoint and nothing will write it again -- dropping it leaves a permanent
+                # hole in the series, at exactly the epochs a periodic checkpoint lands on.
+                self._truncate(self.dir / "step.jsonl", resume_step, drop_equal=True)
+                self._truncate(self.dir / "epoch.jsonl", resume_step, drop_equal=False)
 
     def write(self, stream: str, record: dict) -> None:
         if not self.enabled:
@@ -125,8 +137,10 @@ class MetricsWriter:
         self.close()
 
     @staticmethod
-    def _truncate(path: Path, resume_step: int) -> None:
-        """Drop a trailing partial line and every record at or beyond `resume_step`."""
+    def _truncate(path: Path, resume_step: int, drop_equal: bool = True) -> None:
+        """Drop a trailing partial line, and records beyond `resume_step`.
+
+        `drop_equal` decides the boundary: with it, a record AT `resume_step` goes too."""
         if not path.exists():
             return
         kept: list[str] = []
@@ -137,7 +151,8 @@ class MetricsWriter:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue  # the partial last line of a killed run
-            if int(rec.get("step", -1)) >= resume_step:
+            rec_step = int(rec.get("step", -1))
+            if rec_step > resume_step or (drop_equal and rec_step == resume_step):
                 continue
             kept.append(line)
         path.write_text("".join(line + "\n" for line in kept))

@@ -106,6 +106,32 @@ def test_resume_drops_records_at_or_beyond_the_resume_step(tmp_path):
     assert steps == sorted(set(steps)), "a step appears twice"
 
 
+def test_resume_keeps_the_epoch_that_closed_at_the_resume_step(tmp_path):
+    """The boundary record belongs to the two streams differently.
+
+    An epoch record carries the step count AFTER that epoch closed, so the one at the resume
+    step describes an epoch that finished before the checkpoint. The resumed run starts at the
+    next epoch and never writes it again, so dropping it leaves a permanent hole -- at exactly
+    the epochs `save_every` lands on. Cluster 54 lost epoch 50 that way on 2026-09-15."""
+    with MetricsWriter(tmp_path) as writer:
+        for epoch in range(1, 4):                      # epochs 1..3, 10 steps each
+            writer.write("epoch", {"epoch": epoch, "step": epoch * 10, "loss": 1.0})
+            writer.write("step", {"step": epoch * 10, "lr": 1.0})
+
+    # Resume from the checkpoint written when epoch 2 closed, at step 20.
+    with MetricsWriter(tmp_path, resume_step=20) as writer:
+        writer.write("epoch", {"epoch": 3, "step": 30, "loss": 0.5})
+        writer.write("step", {"step": 20, "lr": 0.5})
+
+    epochs = [r["epoch"] for r in _read(tmp_path / "epoch.jsonl")]
+    assert epochs == [1, 2, 3], f"epoch 2 closed before the checkpoint and must survive: {epochs}"
+    assert epochs == sorted(set(epochs)), "an epoch appears twice"
+
+    # The step stream keeps the opposite convention: its record at 20 IS rewritten.
+    steps = [r["step"] for r in _read(tmp_path / "step.jsonl")]
+    assert steps == [10, 20], f"the resumed run rewrites step 20, so it must not duplicate: {steps}"
+
+
 def test_resume_discards_the_partial_last_line_of_a_killed_run(tmp_path):
     """A SIGKILL mid-write leaves half a line. Reopening must not choke on it."""
     (tmp_path / "step.jsonl").write_text('{"step":0,"lr":1.0}\n{"step":1,"lr":0.9')
