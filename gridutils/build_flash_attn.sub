@@ -1,0 +1,40 @@
+# Builds the flash-attn wheel on a GPU node and stages it in $WCFM_WHEELHOUSE.
+# Run once per torch pin, by one person.
+#
+#   condor_submit gridutils/build_flash_attn.sub
+#
+# `build_env.sh` must have created the venv and installed torch first: the wheel is compiled
+# against that torch. It stops and points here when it finds no wheel to install.
+#
+# Needs a C++ toolchain on the execute node. It has not completed since that node lost
+# `gcc-c++`; the wheel in the wheelhouse was repackaged from an existing install instead.
+
+executable              = gridutils/build_env.sh
+arguments               = "--flash-attn"
+universe                = vanilla
+notification            = never
+
+# uv from GPFS, not $HOME/.local/bin: getenv=False keeps it off the worker's PATH, and home is
+# NFS while the venv and the wheelhouse are not. Empty values fall through to the script's
+# own defaults.
+environment             = "USER=$ENV(USER) HOME=$ENV(HOME) UV=$ENV(UV:/gpfs01/lbne/users/fm/shared/bin/uv) WCFM_PYENV=$ENV(WCFM_PYENV: ) WCFM_WHEELHOUSE=$ENV(WCFM_WHEELHOUSE: )"
+
+output                  = build_flash_attn.$(ClusterId).out
+error                   = build_flash_attn.$(ClusterId).err
+log                     = build_flash_attn.$(ClusterId).log
+stream_output           = True
+stream_error            = True
+
+getenv                  = False
+request_gpus            = 1
+request_cpus            = 8
+request_memory          = 32000
+request_disk            = 20000000
+Requirements            = (GPUs_DeviceName == "NVIDIA L40S") && (GPUs_Capability == 8.9)
+
+should_transfer_files   = YES
+when_to_transfer_output = ON_EXIT
+# The wheel is written straight to the wheelhouse on GPFS; nothing comes back by file transfer.
+transfer_output_files   = ""
+
+queue 1

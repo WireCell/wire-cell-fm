@@ -8,6 +8,7 @@ refusal below otherwise costs a GPU slot and is discovered from a log rather tha
 from __future__ import annotations
 
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -39,13 +40,12 @@ def conf_dir(tmp_path):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    libs = tmp_path / "libs"
-    # All three: `wcfm train` composes its config on the worker, so hydra and omegaconf are
-    # runtime dependencies of the job, not test dependencies. See the missing-libs test below.
-    for pkg in ("lightning_fabric", "hydra", "omegaconf"):
-        (libs / pkg).mkdir(parents=True)
-    monkeypatch.setenv("WCFM_LIBS", str(libs))
-    monkeypatch.setenv("WCFM_PYENV", str(tmp_path / "uvenv"))
+    # The venv has to look real: `wcfm submit` refuses to queue against one that is not there,
+    # because the job installs nothing and would die on `import hydra` after taking a GPU slot.
+    pyenv = tmp_path / "uvenv"
+    (pyenv / "bin").mkdir(parents=True)
+    (pyenv / "bin" / "python").touch()
+    monkeypatch.setenv("WCFM_PYENV", str(pyenv))
     monkeypatch.setenv("WCFM_OUTPUT_BASE", str(tmp_path / "out"))
     monkeypatch.setenv("WCFM_CACHE_DIR", str(tmp_path / "cache"))
     return tmp_path
@@ -237,41 +237,17 @@ def test_omitting_model_submits_the_default_objective(env, conf_dir, capsys):
     assert main(args) == 0, capsys.readouterr().err
 
 
-def test_missing_shared_libs_are_refused_with_the_rebuild_command(
-    tmp_path, monkeypatch, conf_dir, capsys
-):
-    """The job installs nothing -- `getenv=False` leaves uv off the worker's PATH -- so the
-    check belongs here, with the command that fixes it."""
-    monkeypatch.setenv("WCFM_LIBS", str(tmp_path / "absent"))
+def test_a_missing_venv_is_refused_before_the_queue(tmp_path, monkeypatch, conf_dir, capsys):
+    """The job installs nothing -- `getenv=False` leaves uv off the worker's PATH and the venv
+    has no pip -- so everything it needs must be in the venv before anything is queued. hydra
+    and omegaconf are runtime dependencies of `wcfm train`, not test dependencies: the config is
+    composed on the worker, so a venv without them dies on `import hydra` after taking a GPU
+    slot, having passed every login-node check."""
+    monkeypatch.setenv("WCFM_PYENV", str(tmp_path / "absent"))
     monkeypatch.setenv("WCFM_OUTPUT_BASE", str(tmp_path / "out"))
     assert main(_args(conf_dir)) == 2
     err = capsys.readouterr().err
-    assert "--no-deps" in err, "without it the resolver drops a second torch"
-    assert "lightning-fabric>=2.6,<3" in err, "never the umbrella `lightning`"
-
-
-@pytest.mark.parametrize("absent", ["hydra", "omegaconf", "lightning_fabric"])
-def test_a_missing_runtime_dependency_is_named_before_the_queue(
-    tmp_path, monkeypatch, conf_dir, capsys, absent
-):
-    """**hydra and omegaconf are runtime dependencies of the job**, not test dependencies:
-    `wcfm train` composes the config on the worker. They lived only in `wcfm-testlibs` until
-    2026-09-09, so the first real training job -- cluster 2261, the Stage 3 smoke run -- passed
-    every login-node check and then died on `import hydra` after taking a GPU slot. Nothing
-    before Stage 3 could train, so nothing had ever exercised the path.
-
-    Parametrised over all three so a future edit cannot drop one from the check while the
-    other two keep the test green."""
-    libs = tmp_path / "libs"
-    for pkg in ("lightning_fabric", "hydra", "omegaconf"):
-        if pkg != absent:
-            (libs / pkg).mkdir(parents=True)
-    monkeypatch.setenv("WCFM_LIBS", str(libs))
-    monkeypatch.setenv("WCFM_OUTPUT_BASE", str(tmp_path / "out"))
-    assert main(_args(conf_dir)) == 2
-    err = capsys.readouterr().err
-    assert absent in err, f"the refusal does not name {absent}"
-    assert "--no-deps" in err
+    assert "build_env.sh" in err, "the refusal must name the one script that builds the venv"
 
 
 # ------------------------------------------------------------------ --smoke
@@ -370,3 +346,125 @@ def test_the_job_script_installs_nothing():
     ]
     assert not lines, f"the job script installs things: {lines}"
 
+
+JOB_SCRIPTS = (
+    "train/trainjob.sh",
+    "eval/evaljob.sh",
+    "eval/probesjob.sh",
+    "eval/mergejob.sh",
+    "test/test_gpu_job.sh",
+)
+
+
+@pytest.mark.parametrize("script", JOB_SCRIPTS)
+def test_pythonpath_carries_only_the_unpacked_repo(script):
+    """One venv holds everything a job imports, so the only thing PYTHONPATH adds is the repo,
+    and the repo is the archive the job unpacked rather than any checkout.
+
+    A second entry here is how the layered `--target` directories came back: each one is a
+    place a package can sit at a version nothing records, ahead of the venv on the path."""
+    text = (REPO / "gridutils" / script).read_text()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("export PYTHONPATH")]
+    assert lines, f"{script} never sets PYTHONPATH"
+    for ln in lines:
+        assert ln == 'export PYTHONPATH="${repodir}${PYTHONPATH:+:$PYTHONPATH}"', (
+            f"{script} puts something other than the unpacked repo on PYTHONPATH: {ln}"
+        )
+
+
+@pytest.mark.parametrize("script", JOB_SCRIPTS)
+def test_every_job_checks_wcfm_came_from_the_archive(script):
+    """`build_env.sh` installs the checkout editable, so the venv carries a `.pth` pointing at
+    whatever tree it was built from. PYTHONPATH precedes site-packages and the archive wins, but
+    if that ever inverts the job runs different code with nothing else to show for it."""
+    text = (REPO / "gridutils" / script).read_text()
+    assert "not the unpacked archive at" in text, f"{script} does not check where wcfm came from"
+
+
+
+# ------------------------------------------------------- resume across executions
+
+#: The restore block of `trainjob.sh`, delimited by two comment lines so the behaviour can be
+#: exercised without a GPU or a real trainer. Coupled to those markers on purpose: the block is
+#: shell, and asserting on its text instead would not have caught what it is here to prevent.
+_RESTORE_START = "# --- resume: bring back what the engine reads at startup"
+
+
+def _run_restore(tmp_path: Path, outdir: Path) -> Path:
+    """Run the restore block against `outdir`, and return the scratch run directory."""
+    text = (REPO / "gridutils" / "train" / "trainjob.sh").read_text().splitlines()
+    start = next(i for i, ln in enumerate(text) if ln.startswith(_RESTORE_START))
+    end = next(i for i in range(start, len(text)) if text[i] == "fi")
+    scratch_root = tmp_path / "scratch" / "runs"
+    scratch_root.mkdir(parents=True)
+    script = tmp_path / "block.sh"
+    script.write_text(
+        "set -uo pipefail\n"
+        f"outdir={outdir}\n"
+        "run_name=r\n"
+        f"scratch_root={scratch_root}\n"
+        'scratch_run="${scratch_root}/${run_name}"\n' + "\n".join(text[start : end + 1]) + "\n"
+    )
+    subprocess.run(["bash", str(script)], check=True, capture_output=True)
+    return scratch_root / "r"
+
+
+def _gpfs_run_dir(tmp_path: Path, epochs=(5, 10, 50), latest=True) -> Path:
+    out = tmp_path / "gpfs"
+    (out / "checkpoints").mkdir(parents=True)
+    (out / "metrics" / "arrays").mkdir(parents=True)
+    for e in epochs:
+        (out / "checkpoints" / f"checkpoint_epoch{e}.pt").write_text(f"ckpt{e}")
+    if latest:
+        (out / "checkpoints" / "latest.pt").write_text("latest")
+    (out / "metrics" / "step.jsonl").write_text('{"step":1}\n')
+    (out / "metrics" / "epoch.jsonl").write_text('{"epoch":1}\n')
+    (out / "metrics" / "schema.json").write_text("{}")
+    (out / "metrics" / "arrays" / "cov_step0.npy").write_text("npy")
+    return out
+
+
+def test_an_evicted_run_gets_back_exactly_what_a_resume_reads(tmp_path):
+    """`run.output_root` is per-execution scratch, so a re-queued job starts with an empty run
+    directory: `resolve_resume("auto", ...)` then returns None and a 100-epoch run restarts from
+    epoch 0 in silence, while the first sync overwrites the metrics on GPFS with the short new
+    stream. Cluster 18.0 lost 58 epochs to exactly that.
+
+    Only what a resume reads comes back, because a checkpoint can be large: the two files
+    `resolve_resume` chooses between, and the two streams `MetricsWriter` truncates at the
+    resume step. `arrays/` is never read back and `schema.json` is rewritten from the writer's
+    own names, so copying either would be wasted bytes."""
+    run = _run_restore(tmp_path, _gpfs_run_dir(tmp_path))
+    restored = {p.relative_to(run).as_posix() for p in run.rglob("*") if p.is_file()}
+    assert restored == {
+        "checkpoints/latest.pt",
+        "checkpoints/checkpoint_epoch50.pt",
+        "metrics/step.jsonl",
+        "metrics/epoch.jsonl",
+    }, restored
+
+
+def test_the_newest_checkpoint_is_chosen_numerically_not_lexically(tmp_path):
+    """`checkpoint_epoch100.pt` sorts before `checkpoint_epoch5.pt` as a string. Restoring the
+    wrong one silently rewinds the run to an earlier epoch, which no later check would catch."""
+    run = _run_restore(tmp_path, _gpfs_run_dir(tmp_path, epochs=(5, 50, 100), latest=False))
+    assert [p.name for p in (run / "checkpoints").iterdir()] == ["checkpoint_epoch100.pt"]
+
+
+def test_a_first_run_leaves_the_scratch_directory_alone(tmp_path):
+    """`sync_back` refuses when the engine wrote nothing at `$scratch_run`, which is what
+    catches a `run_name` this script computed differently from the composed `run.name` --
+    `wcfm submit --smoke` appends its suffix in the submit process only. Creating the directory
+    here on a fresh run would hand that check a false positive."""
+    run = _run_restore(tmp_path, tmp_path / "gpfs-that-does-not-exist")
+    assert not run.exists()
+
+
+def test_sync_back_tests_for_engine_output_not_for_the_directory(tmp_path):
+    """The restore creates `$scratch_run`, so its existence no longer means the engine wrote
+    there. Only `write_run_dir` writes `run_metadata.json`, and the restore skips it."""
+    text = (REPO / "gridutils" / "train" / "trainjob.sh").read_text()
+    assert 'if [ ! -f "${scratch_run}/run_metadata.json" ]; then' in text
+    assert 'if [ ! -d "$scratch_run" ]; then' not in text, (
+        "the directory check cannot survive the restore: it would always pass"
+    )

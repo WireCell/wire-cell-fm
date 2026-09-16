@@ -16,3 +16,8 @@ sweeps/
 # the module on first use, so it is build output, not source -- and it is 744 KB of it. The
 # old repo ignored its copy for the same reason (`/data/*.npz`). Delete it to force a reparse.
 wcfm/data/wire_geometry_*.npz
+
+# Condor logs from `gridutils/build_flash_attn.sub`, which writes them beside the submit dir.
+build_flash_attn.*.out
+build_flash_attn.*.err
+build_flash_attn.*.log

@@ -17,12 +17,21 @@ dependencies = [
     "numpy",
     "h5py",
     "pyyaml",
+    "scikit-learn",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "ruff>=0.5",
+]
+
+# no direct dependencies, but useful for the venv 
+analysis = [
+    "matplotlib",
+    "umap-learn",
+    "tqdm",
+    "fire",
 ]
 
 [project.scripts]

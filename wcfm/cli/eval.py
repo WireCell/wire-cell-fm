@@ -68,7 +68,9 @@ extract options:
   --sources=a,b       branches to write            (default: student,teacher; missing dropped)
   --taps=a,b          named intermediates as well as the final map  (default: none)
   --max-images=N      cap on EVENTS, not batches   (default: 10000)
-  --batch-size=N      throughput only              (default: the run's data.global_batch_size)
+  --batch-size=N      throughput only   (default: the run's PER-RANK batch, because extraction
+                      is one process; warpconvnet's hash table packs the batch index into 9 bits
+                      and refuses more than 512 images in one forward)
   --num-workers=N     loader workers               (default: 4)
   --rows=all|pooled   write every pixel, or only the pooled rows      (default: all)
   --pool-per-class=N  balanced pool size per class (default: 10000, probe_pid's own)
@@ -152,6 +154,8 @@ def _git_sha(run_dir: Path) -> str:
 def _extract(argv: list[str]) -> int:
     from omegaconf import OmegaConf
 
+    from wcfm.config.io import per_rank_batch_size
+
     # Imported here, not at module scope: `wcfm.eval.extract` pulls in torch, and
     # `wcfm eval --help` has to work in the config-only environment where there is none.
     from wcfm.eval.extract import DEFAULT_POOL_PER_CLASS
@@ -194,6 +198,14 @@ def _extract(argv: list[str]) -> int:
     data_cfg = OmegaConf.create(OmegaConf.to_container(cfg.data, resolve=True))
     if "batch-size" in flags:
         data_cfg.global_batch_size = int(flags["batch-size"])
+    else:
+        # Extraction is ONE process, so it must not inherit a batch sized for the whole world.
+        # `global_batch_size` grows with `launch.devices`, so it is divided by the number of devices 
+        # to get the per-rank batch size.
+        devices = int(OmegaConf.select(cfg, "launch.devices", default=1) or 1)
+        data_cfg.global_batch_size = per_rank_batch_size(
+            int(cfg.data.global_batch_size), devices
+        )
     batch_size = int(data_cfg.global_batch_size)
     # The cap on the READ. The loop caps the event count itself as well, because the sharded
     # reader rounds `n_subset` up to a whole shard -- so this is an optimisation, not the rule.
@@ -454,15 +466,19 @@ def _submit(argv: list[str]) -> int:
         return 2
     out_root = Path(flags.get("out-root", run_dir / "features"))
     job_dir = out_root / "dag" / "job"
+    user = os.environ.get("USER", "unknown")
     plan = DagPlan(
         run_dir=run_dir,
         out_root=out_root,
         repo=repo,
         repo_archive=job_dir / ARCHIVE_NAME,
         git_env=git_environment(repo),
-        pyenv=Path(os.environ.get("WCFM_PYENV", "/gpfs01/lbne/users/fm/$USER/uvenv")),
-        libs=Path(os.environ.get("WCFM_LIBS", "/gpfs01/lbne/users/fm/$USER/wcfm-libs")),
-        cache=Path(os.environ.get("WCFM_CACHE", str(run_dir.parent / ".cache"))),
+        # `$USER` in a default has to be interpolated here: nothing expands it downstream, so a
+        # literal one reaches Condor as a directory named `$USER`.
+        pyenv=Path(os.environ.get("WCFM_PYENV", f"/gpfs01/lbne/users/fm/{user}/uvenv")),
+        # `WCFM_CACHE_DIR`, the same name `wcfm submit` and `wcfm test` read. The default stays
+        # the run's own sibling, which is where existing extractions already cache.
+        cache=Path(os.environ.get("WCFM_CACHE_DIR", str(run_dir.parent / ".cache"))),
         checkpoints=checkpoints,
         eval_set_root=Path(flags.get("eval-set-root", out_root / "eval_set")),
         stages=flags.get("stages", "pid,knn,overlap,instance,vertex,event,spectrum"),

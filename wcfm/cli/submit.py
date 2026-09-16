@@ -171,7 +171,6 @@ def main(argv: list[str]) -> int:
 
     user = os.environ.get("USER", "unknown")
     pyenv = Path(os.environ.get("WCFM_PYENV", f"/gpfs01/lbne/users/fm/{user}/uvenv"))
-    libs = Path(os.environ.get("WCFM_LIBS", f"/gpfs01/lbne/users/fm/{user}/wcfm-libs"))
     cache = Path(os.environ.get("WCFM_CACHE_DIR", f"/gpfs01/lbne/users/fm/{user}/cache"))
     output_base = Path(
         os.environ.get("WCFM_OUTPUT_BASE", f"/gpfs01/lbne/users/fm/{user}/CONDOR_OUT")
@@ -181,19 +180,13 @@ def main(argv: list[str]) -> int:
     if not job_script.is_file():
         print(f"wcfm submit: no job script at {job_script}", file=sys.stderr)
         return 2
-    # hydra and omegaconf are runtime dependencies of `wcfm train` -- the config is composed on
-    # the worker -- so the shared runtime libs must carry them, not only the test libs. The
-    # first real training job (cluster 2261, 2026-09-09) died on `import hydra` for exactly
-    # this reason, having passed every login-node check.
-    needed = ("lightning_fabric", "hydra", "omegaconf")
-    missing = [pkg for pkg in needed if not (libs / pkg).is_dir()]
-    if missing:
+    # The job installs nothing, so the venv has to carry everything before it is queued. hydra
+    # and omegaconf are runtime dependencies, not test ones: the config is composed on the
+    # worker, so a venv without them dies on `import hydra` before it trains anything.
+    if not (pyenv / "bin" / "python").is_file():
         print(
-            f"wcfm submit: {', '.join(missing)} not at {libs}. The job installs nothing; build "
-            f"the shared runtime libs once:\n  uv pip install --python {pyenv}/bin/python "
-            f"--target {libs} --no-deps \\\n      'lightning-fabric>=2.6,<3' "
-            "'hydra-core>=1.3.6,<1.4' 'omegaconf>=2.3.1,<2.4' "
-            "'antlr4-python3-runtime==4.9.3' 'PyYAML>=6'",
+            f"wcfm submit: no venv at {pyenv}. Build it once:\n"
+            f"  gridutils/build_env.sh",
             file=sys.stderr,
         )
         return 2
@@ -237,7 +230,6 @@ def main(argv: list[str]) -> int:
         p
         for p in (
             "CLUSTER_ID=$(ClusterId) JOB_ID=$(ProcId)",
-            f"WCFM_LIBS={libs}",
             git_environment(repo),
         )
         if p

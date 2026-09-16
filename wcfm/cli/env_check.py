@@ -9,9 +9,11 @@ an environment is a fact about the run rather than about the login node it was s
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import pathlib
 import platform
 import sys
+import traceback
 
 import wcfm
 
@@ -19,10 +21,27 @@ PINNED = ("torch", "warpconvnet", "flash_attn", "torch_scatter")
 FRAMEWORK = ("hydra", "omegaconf", "lightning_fabric", "numpy", "h5py")
 
 
+def _installed_version(name: str) -> str | None:
+    """The version from package metadata, for a package that is present but will not import."""
+    for candidate in (name, name.replace("_", "-")):
+        try:
+            return importlib.metadata.version(candidate)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    return None
+
+
 def _version(name: str) -> str:
     try:
         mod = importlib.import_module(name)
     except Exception as e:  # noqa: BLE001 - any import failure is the finding
+        # A compiled extension linking libcuda.so.1 cannot load where no GPU driver is
+        # installed, which is every login node. That is not a missing package, and reporting it
+        # as ABSENT sends people to reinstall a stack that is already correct..
+        if "libcuda" in "".join(traceback.format_exception(e)):
+            found = _installed_version(name)
+            if found is not None:
+                return f"{found} (installed; needs a GPU driver to import)"
         return f"ABSENT ({type(e).__name__})"
     return str(getattr(mod, "__version__", "?"))
 

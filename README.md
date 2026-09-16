@@ -10,6 +10,27 @@ wcfm submit model=hybrid run.name=x   # the same run, queued on the cluster
 wcfm eval submit runs/my_run          # score its checkpoints
 ```
 
+## Installation
+
+One script builds the GPU stack and the framework's own dependencies.
+Every dependency and version is pinned at the top of that script.
+Set `WCFM_PYENV` to specify the location of the python environemnt.
+
+```bash
+git clone <this repo> && cd wire-cell-fm
+gridutils/build_env.sh                      # ~10 min; writes to $WCFM_PYENV
+source $WCFM_PYENV/bin/activate
+wcfm env-check                              # check the staack
+```
+
+The script relies on pre-compiled wheels for both `torch+warpconvnet` and `flash-attn`. These are available from one shared directory, `$WCFM_WHEELHOUSE`, which defaults to `/gpfs01/lbne/users/fm/shared/wheels`. 
+
+Since `flash-attn` wheels are not always easily available, a build script is also provided:
+
+```bash
+condor_submit gridutils/build_flash_attn.sub   # once per torch pin, by one person
+```
+
 ## The one structural idea
 
 The framework does not know what a model is doing. Framework packages — `config`, `data`,
@@ -42,7 +63,7 @@ Supporting trees: `conf/` is the Hydra config tree, `gridutils/` holds the Condo
 `Trainer` is constructed in exactly one place. The whole chain, top to bottom:
 
 ```
-pyproject.toml:38      wcfm = "wcfm.cli.__main__:main"          console script
+pyproject.toml:29      wcfm = "wcfm.cli.__main__:main"          console script
   cli/__main__.py:32   import_module(COMMANDS[name]).main(rest) dispatch on argv[0]
     cli/train.py       register_all(); hydra.compose(...)       -> cfg
       cli/train.py:148   run(cfg)

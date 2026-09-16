@@ -6,7 +6,7 @@
 #
 # Args (positional):
 #   $1 archive  -- basename of the transferred repo tarball (unpacked into scratch)
-#   $2 pyenv    -- the cluster uv venv
+#   $2 pyenv    -- the venv built by gridutils/build_env.sh (the whole stack)
 #   $3 store    -- ONE checkpoint's feature store: <run>/features/epoch<N>
 #   $4 outdir   -- where the probe JSONs go (one directory per RUN, not per epoch)
 #   $5 stages   -- comma-separated stage list
@@ -47,19 +47,23 @@ echo ""
 export PYTHONUNBUFFERED=1
 source "${pyenv}/bin/activate"
 
-# Nothing is installed by this job -- see trainjob.sh for the three ways that goes wrong.
-WCFM_LIBS="${WCFM_LIBS:-/gpfs01/lbne/users/fm/${USER}/wcfm-libs}"
-for pkg in hydra omegaconf; do
-  if [ ! -d "${WCFM_LIBS}/${pkg}" ]; then
-    echo "FATAL: no ${pkg} at ${WCFM_LIBS}"
-    exit 3
-  fi
-done
-export PYTHONPATH="${WCFM_LIBS}:${repodir}${PYTHONPATH:+:$PYTHONPATH}"
+# Nothing is installed by this job -- see trainjob.sh. Everything is in the venv; the repo is
+# the only thing PYTHONPATH adds, and it is the archive this job unpacked.
+export PYTHONPATH="${repodir}${PYTHONPATH:+:$PYTHONPATH}"
 
 # Stay in scratch, which holds `repo/` and the archive but nothing importable -- see the
 # unpack block at the top.
 cd "${_CONDOR_SCRATCH_DIR:-/tmp}"
+
+# No torch check here: the probe suite is deliberately torch-free (wcfm/eval/probes/__init__.py).
+# `wcfm` still has to come from the archive rather than the venv's editable install -- see
+# trainjob.sh.
+python - "$repodir" <<'PY' || { echo "FATAL: wrong environment"; exit 3; }
+import os, sys, wcfm
+repodir = os.path.realpath(sys.argv[1])
+assert os.path.realpath(wcfm.__file__).startswith(repodir), \
+    f"wcfm came from {wcfm.__file__}, not the unpacked archive at {repodir}"
+PY
 
 if [ ! -f "${store}/provenance.json" ]; then
   echo "FATAL: no provenance.json in ${store} -- extraction did not produce this store"

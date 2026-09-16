@@ -103,6 +103,59 @@ Markdown carries history, decisions and measurements. In the development tree th
 `docs/`, where ADRs are numbered, one decision each, and are never edited in place —
 supersede with a new file.
 
+## Cluster jobs
+
+`gridutils/` holds one Condor script per command. None is ever run from the checkout: a submit
+packs the tree into `repo.tgz` and stages a copy of the script beside it, so an edit made during
+the queue window cannot reach a job that has not started. Each script unpacks the archive into
+scratch, puts that on `PYTHONPATH`, and asserts that torch came from the venv it was handed as
+`$2` and `wcfm` from the archive rather than the venv's editable install.
+
+| script | runs |
+|---|---|
+| `train/trainjob.sh` | `wcfm train`, one process per rank under torchrun |
+| `eval/evaljob.sh` | `wcfm eval extract`, GPU, one checkpoint |
+| `eval/probesjob.sh` | the probe suite, CPU only |
+| `eval/mergejob.sh` | the table, CPU, seconds |
+| `test/test_gpu_job.sh` | the `gpu` and `distributed` suites |
+
+A run writes to node-local scratch and rsyncs to GPFS every 300 s. On a restart the script
+restores the newest checkpoint and the two metrics streams back from GPFS first, because scratch
+is empty on every new execution and `run.resume=auto` would otherwise find nothing and start
+from epoch 0 in silence.
+
+`wcfm eval submit` builds a DAG, not a loop: `extract -> probes` per checkpoint, all fanning
+into one `merge`. Extraction takes a GPU once per checkpoint while every probe stage runs on a
+CPU slot, so a queue with one free GPU still makes progress on a campaign. A PRE script skips an
+extraction whose `provenance.json` already records that checkpoint's sha256, which is what makes
+re-submitting the normal way to extend a campaign rather than a workaround — though DAGMan's own
+leftover `eval.dag.*` files have to be cleared first. `merge` cannot fail the DAG: its table is a
+view over the probe JSONs and rebuilds in seconds.
+
+Extraction is one process, so it takes the per-rank batch and not the global one: warpconvnet
+packs the batch index into 9 bits and refuses more than 512 images in a single forward.
+
 ## Tooling
 
 Line length 100, ruff `E,F,I,B,UP`, Python 3.11.
+
+One venv holds everything, and `gridutils/build_env.sh` is the only thing that creates it. Every
+pinned version is in the block at the top of that script and nowhere else. `pyproject.toml`
+declares the framework's own dependencies and deliberately not the GPU stack, which it must
+never resolve. numpy is not pinned: every wheel here declares it unpinned, so the build verifies
+that torch did not move rather than dictating a version.
+
+Compiled wheels come from `$WCFM_WHEELHOUSE`, so a rebuild needs no network and cannot pick up a
+re-tagged release. warpconvnet is downloaded there on first use; flash-attn has to be there
+already, because upstream publishes none for the pinned torch. The staged one was repackaged
+from an existing install — `build_flash_attn.sub` compiles a fresh one and has not completed
+since the GPU node lost `gcc-c++`.
+
+warpconvnet stays below 1.8. NVIDIA's 1.8 wheels link `libcuda`, so nothing importing
+`wcfm.data.voxels` can run where there is no GPU driver, and the CPU suite stops being a
+pre-queue gate. 1.7.11 is the ceiling and needs one rename in the backbone.
+
+A job installs nothing. `getenv=False` keeps uv off the worker's PATH and the venv has no pip,
+so anything a job imports has to be in the venv before it is queued. `PYTHONPATH` on a worker
+carries the unpacked archive and nothing else — a second entry is how a package ends up ahead of
+the venv at a version nothing records.

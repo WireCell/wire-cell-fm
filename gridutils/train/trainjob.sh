@@ -4,7 +4,7 @@
 #
 # Args (positional):
 #   $1 archive   -- basename of the transferred repo tarball (unpacked into scratch)
-#   $2 pyenv     -- the cluster uv venv (torch/warpconvnet stack)
+#   $2 pyenv     -- the venv built by gridutils/build_env.sh (the whole stack)
 #   $3 outdir    -- run directory on GPFS; scratch is rsynced here
 #   $4 run_name  -- must match `run.name` in the overrides
 #   $5 cache_dir -- base for the warpconvnet benchmark cache and the data index
@@ -95,58 +95,73 @@ echo "  NCCL_P2P_DISABLE=${NCCL_P2P_DISABLE}  WARPCONVNET_BENCHMARK_CACHE_DIR=${
 
 source "${pyenv}/bin/activate"
 
-# Nothing is installed by this job, and nothing may be. `getenv=False` leaves ~/.local/bin off
-# the worker's PATH so there is no uv here, the cluster venv has no pip, and a `--target`
-# install without --no-deps drops a SECOND torch that shadows the pinned 2.10.0+cu128 on
-# PYTHONPATH. lightning-fabric lives once on GPFS instead, and the repo is reached by
-# PYTHONPATH.
-WCFM_LIBS="${WCFM_LIBS:-/gpfs01/lbne/users/fm/${USER}/wcfm-libs}"
-# hydra and omegaconf are RUNTIME dependencies of `wcfm train`, not test dependencies: the
-# config is composed on the worker, so a job without them dies on `import hydra` before it
-# trains anything. The install lines below are --no-deps on purpose, because a resolver must
-# never touch the pinned torch (pyproject.toml). antlr4 and PyYAML are the two members of
-# hydra's and omegaconf's closure the uvenv does not already carry.
-for pkg in lightning_fabric hydra omegaconf; do
-  if [ ! -d "${WCFM_LIBS}/${pkg}" ]; then
-    echo "FATAL: no ${pkg} at ${WCFM_LIBS}. Build the shared runtime libs once:"
-    echo "  uv pip install --python ${pyenv}/bin/python --target ${WCFM_LIBS} --no-deps \\"
-    echo "      'lightning-fabric>=2.6,<3' 'hydra-core>=1.3.6,<1.4' 'omegaconf>=2.3.1,<2.4' \\"
-    echo "      'antlr4-python3-runtime==4.9.3' 'PyYAML>=6'"
-    exit 3
-  fi
-done
-export PYTHONPATH="${WCFM_LIBS}:${repodir}${PYTHONPATH:+:$PYTHONPATH}"
+# Nothing is installed by this job. Everything it needs is in the venv, built by
+# `gridutils/build_env.sh` -- including hydra and omegaconf, which are runtime dependencies here
+# because the config is composed on the worker. The repo is the only thing PYTHONPATH adds, and
+# it is the archive this job unpacked.
+export PYTHONPATH="${repodir}${PYTHONPATH:+:$PYTHONPATH}"
 
 # Scratch is where we already are, but say it: nothing between here and the trainer may leave
 # the job somewhere importable. See the unpack block at the top for why that matters.
 cd "${_CONDOR_SCRATCH_DIR:-/tmp}"
 
 
-python - <<'PY' || { echo "FATAL: wrong torch on the path"; exit 3; }
-import torch, lightning_fabric
-assert "uvenv" in torch.__file__, f"torch came from {torch.__file__}, not the pinned venv"
+# torch from the venv, `wcfm` from the archive -- not from the editable install `build_env.sh`
+# leaves in the venv, pointing at whatever checkout built it. PYTHONPATH wins today; if that
+# ever inverts the job runs different code with no other sign. realpath both sides: GPFS serves
+# this tree as /gpfs01/... and as /gpfs/mnt/gpfs01/....
+python - "$pyenv" "$repodir" <<'PY' || { echo "FATAL: wrong environment"; exit 3; }
+import os, sys, torch, lightning_fabric, wcfm
+pyenv, repodir = (os.path.realpath(p) for p in sys.argv[1:3])
+assert os.path.realpath(torch.__file__).startswith(pyenv), \
+    f"torch came from {torch.__file__}, not the venv at {pyenv}"
+assert os.path.realpath(wcfm.__file__).startswith(repodir), \
+    f"wcfm came from {wcfm.__file__}, not the unpacked archive at {repodir}"
 print(f"torch {torch.__version__} | lightning-fabric {lightning_fabric.__version__} | "
       f"cuda {torch.cuda.is_available()} devices {torch.cuda.device_count()}")
 PY
 
 # `run.output_root` is scratch; the engine creates <root>/<run_name>/{checkpoints,debug,
 # probes,features,metrics} itself, so the rsync is one directory.
-#
-# $scratch_run must NOT be pre-created here. A mkdir in this script makes the directory exist
-# whether or not the engine wrote to it, so a run whose name this script computed differently
-# from the engine's -- `wcfm submit --smoke` appends a suffix in the submit process only --
-# rsyncs the empty one it just made. rsync succeeds, `|| true` has nothing to swallow, the job
-# exits 0 and every output is thrown away. Let the engine create it, and treat its absence as
-# the failure it is.
 scratch_root="${_CONDOR_SCRATCH_DIR}/runs"
 scratch_run="${scratch_root}/${run_name}"
 mkdir -p "$scratch_root"
 
+# --- resume: bring back what the engine reads at startup ----------------------
+# Scratch starts empty on every execution, so without this `run.resume=auto` finds no checkpoint
+# and restarts from epoch 0 in silence, overwriting the GPFS metrics on the first sync.
+#
+# To avoid this, the job rsyncs back the last checkpoint (if available) and the two metrics streams.
+# arrays/ is never read back and schema.json is rewritten from the writer's own
+# names. rsync runs without --delete, so the older checkpoints on GPFS stay there.
+# run_metadata.json is also not restored.
+if [ -d "${outdir}/checkpoints" ]; then
+  echo "Resuming: restoring from ${outdir}"
+  mkdir -p "${scratch_run}/checkpoints" "${scratch_run}/metrics"
+  restore() {
+    [ -f "$1" ] || return 0
+    rsync -a "$1" "$2" || {
+      echo "FATAL: cannot restore $1. Refusing to continue, because the alternative is a"
+      echo "silent restart from epoch 0 that then overwrites the checkpoints on GPFS."
+      exit 3
+    }
+    echo "  restored $(basename "$1")"
+  }
+  restore "${outdir}/checkpoints/latest.pt" "${scratch_run}/checkpoints/"
+  newest=$(ls -1 "${outdir}/checkpoints"/checkpoint_epoch*.pt 2>/dev/null | sort -V | tail -1)
+  [ -n "$newest" ] && restore "$newest" "${scratch_run}/checkpoints/"
+  restore "${outdir}/metrics/step.jsonl" "${scratch_run}/metrics/"
+  restore "${outdir}/metrics/epoch.jsonl" "${scratch_run}/metrics/"
+fi
+
 sync_back() {
-  if [ ! -d "$scratch_run" ]; then
-    echo "WARNING: nothing at ${scratch_run} to sync. The engine writes <output_root>/<run.name>," \
-         "so run_name=${run_name} disagrees with the composed run.name. Present under" \
-         "${scratch_root}: $(ls "$scratch_root" 2>/dev/null | tr '\n' ' ')"
+  # `run_metadata.json` and not the directory: the restore above creates $scratch_run, so its
+  # existence no longer says the engine wrote anything.
+  if [ ! -f "${scratch_run}/run_metadata.json" ]; then
+    echo "WARNING: no run_metadata.json at ${scratch_run}, so the engine did not write here." \
+         "It writes <output_root>/<run.name>, so run_name=${run_name} disagrees with the" \
+         "composed run.name. Present under ${scratch_root}:" \
+         "$(ls "$scratch_root" 2>/dev/null | tr '\n' ' ')"
     return 1
   fi
   echo "Syncing ${scratch_run} -> ${outdir}"

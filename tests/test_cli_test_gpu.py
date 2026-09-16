@@ -22,13 +22,12 @@ REPO = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def fake_env(tmp_path, monkeypatch):
-    """Shared library directories that exist, so the precondition check passes and the rest of
-    the command can be exercised. Their *absence* is what the next test covers."""
-    for name, sub in (("WCFM_LIBS", "lightning_fabric"), ("WCFM_TESTLIBS", "pytest")):
-        root = tmp_path / name.lower()
-        (root / sub).mkdir(parents=True)
-        monkeypatch.setenv(name, str(root))
-    monkeypatch.setenv("WCFM_PYENV", str(tmp_path / "uvenv"))
+    """A venv that exists, so the precondition check passes and the rest of the command can be
+    exercised. Its *absence* is what the next test covers."""
+    pyenv = tmp_path / "uvenv"
+    (pyenv / "bin").mkdir(parents=True)
+    (pyenv / "bin" / "python").touch()
+    monkeypatch.setenv("WCFM_PYENV", str(pyenv))
     monkeypatch.setenv("WCFM_OUTPUT_BASE", str(tmp_path / "out"))
     return tmp_path
 
@@ -100,23 +99,17 @@ def test_the_job_script_that_gets_staged_exists_and_is_executable():
     assert os.access(script, os.X_OK), "Condor executes it directly; it must be +x"
 
 
-def test_missing_shared_libraries_are_refused_before_submitting(tmp_path, monkeypatch, capsys):
+def test_a_missing_venv_is_refused_before_submitting(tmp_path, monkeypatch, capsys):
     """**The job installs nothing.** ``getenv=False`` leaves ``~/.local/bin`` off the worker's
-    PATH so there is no ``uv`` there, and the cluster venv has no pip -- an earlier submission
-    died on exactly that in six seconds. So the check belongs here, with the command that
-    fixes it."""
-    monkeypatch.setenv("WCFM_LIBS", str(tmp_path / "nope"))
-    monkeypatch.setenv("WCFM_TESTLIBS", str(tmp_path / "also-nope"))
+    PATH so there is no ``uv`` there, and the venv has no pip -- an earlier submission died on
+    exactly that in six seconds. So the check belongs here, with the command that fixes it."""
+    monkeypatch.setenv("WCFM_PYENV", str(tmp_path / "nope"))
     monkeypatch.setenv("WCFM_OUTPUT_BASE", str(tmp_path / "out"))
 
     assert main(["--gpu", "--dry-run"]) == 2
     err = capsys.readouterr().err
-    assert "no lightning-fabric" in err and "no pytest" in err
-    assert "--no-deps" in err, (
-        "the rebuild command must carry --no-deps: without it the resolver drops a second "
-        "torch into the target, which shadows the pinned 2.10.0+cu128 on PYTHONPATH"
-    )
-    assert "lightning-fabric>=2.6,<3" in err, "never the umbrella `lightning`"
+    assert "no venv" in err
+    assert "build_env.sh" in err, "the refusal must name the one script that builds the venv"
 
 
 def test_fewer_than_two_gpus_warns_that_the_distributed_suite_becomes_vacuous(

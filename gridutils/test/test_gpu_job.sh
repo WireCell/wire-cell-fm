@@ -4,7 +4,7 @@
 #
 # Args (positional):
 #   $1 archive  -- basename of the transferred repo tarball (unpacked into scratch)
-#   $2 pyenv    -- the cluster uv venv (torch/warpconvnet stack)
+#   $2 pyenv    -- the venv built by gridutils/build_env.sh (the whole stack)
 #   $3 outdir   -- where to leave the report
 #   $4 pytest_k -- optional -k expression, "" for none
 #   $5 cache_dir -- base for the warpconvnet benchmark cache (GPFS)
@@ -62,8 +62,7 @@ export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
 # it defaults to ~/.cache/warpconvnet on NFS *home*, which is wrong twice over: home is the wrong
 # filesystem for job scratch, and `_do_save` takes an fcntl.flock(LOCK_EX) with no timeout, which
 # over NFS can block indefinitely -- two ranks of the distributed suite contend for exactly that
-# lock. trainjob.sh:48-57 and evaljob.sh:41-46 have always done this; this script and
-# spike_c_job.sh were the two that missed it.
+# lock. trainjob.sh and evaljob.sh set it the same way and for the same reason.
 wp_cache_gpfs="${cache_dir}/warpconvnet"
 wp_cache="${_CONDOR_SCRATCH_DIR}/warpconvnet"
 mkdir -p "$wp_cache_gpfs"
@@ -76,35 +75,21 @@ echo "  WARPCONVNET_BENCHMARK_CACHE_DIR=${wp_cache}"
 
 source "${pyenv}/bin/activate"
 
-# Nothing is installed by this job. lightning-fabric and pytest live in shared directories on
-# GPFS, built once, reached by PYTHONPATH -- so the production venv stays byte-identical and
-# the worker never needs uv on its PATH (getenv=False leaves ~/.local/bin off it, which killed
-# an earlier submission in six seconds).
-#
-# Rebuild them with:
-#   uv pip install --python ${pyenv}/bin/python --target ${WCFM_LIBS} --no-deps \
-#       'lightning-fabric>=2.6,<3' lightning-utilities
-#   uv pip install --python ${pyenv}/bin/python --target ${WCFM_TESTLIBS} \
-#       pytest 'hydra-core>=1.3.6,<1.4' 'omegaconf>=2.3,<2.4'
-#
-# --no-deps and lightning-fabric (not the umbrella `lightning`) both matter. Without --no-deps
-# the resolver drops a SECOND torch into the target, which shadows the pinned 2.10.0+cu128 on
-# PYTHONPATH. The umbrella package pulls lightning.pytorch and therefore torchmetrics, absent.
-WCFM_LIBS="${WCFM_LIBS:-/gpfs01/lbne/users/fm/${USER}/wcfm-libs}"
-WCFM_TESTLIBS="${WCFM_TESTLIBS:-/gpfs01/lbne/users/fm/${USER}/wcfm-testlibs}"
-for d in "${WCFM_LIBS}/lightning_fabric" "${WCFM_TESTLIBS}/pytest"; do
-  [ -d "$d" ] || { echo "FATAL: missing ${d}. Build it once (commands in this script)."; exit 3; }
-done
-export PYTHONPATH="${WCFM_LIBS}:${WCFM_TESTLIBS}:${repodir}${PYTHONPATH:+:$PYTHONPATH}"
-echo "  WCFM_LIBS=${WCFM_LIBS}"
-echo "  WCFM_TESTLIBS=${WCFM_TESTLIBS}"
+# Nothing is installed by this job, pytest and the framework
+# come from the venv, built by `gridutils/build_env.sh`, along with the GPU stack.
+export PYTHONPATH="${repodir}${PYTHONPATH:+:$PYTHONPATH}"
 
-# The stack has to be the pinned one. A second torch on PYTHONPATH is the failure this repo's
-# pyproject.toml warns about, and it would make every result below meaningless.
-python - <<'PY' || { echo "FATAL: wrong torch on the path"; exit 3; }
-import sys
-import torch, lightning_fabric, pytest, hydra
-assert "uvenv" in torch.__file__, f"torch came from {torch.__file__}, not the pinned venv"
+# The stack has to be the pinned one, and the tests have to be the ones in the archive: this
+# job runs pytest from ${repodir}, so a `wcfm` imported from anywhere else would test different
+# code than it collected. See trainjob.sh for why realpath.
+python - "$pyenv" "$repodir" <<'PY' || { echo "FATAL: wrong environment"; exit 3; }
+import os, sys
+import torch, lightning_fabric, pytest, hydra, wcfm
+pyenv, repodir = (os.path.realpath(p) for p in sys.argv[1:3])
+assert os.path.realpath(torch.__file__).startswith(pyenv), \
+    f"torch came from {torch.__file__}, not the venv at {pyenv}"
+assert os.path.realpath(wcfm.__file__).startswith(repodir), \
+    f"wcfm came from {wcfm.__file__}, not the unpacked archive at {repodir}"
 print(f"torch {torch.__version__} | lightning-fabric {lightning_fabric.__version__} | "
       f"pytest {pytest.__version__} | hydra {hydra.__version__}")
 print(f"cuda {torch.cuda.is_available()} devices {torch.cuda.device_count()}")

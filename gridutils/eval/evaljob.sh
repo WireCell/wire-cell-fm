@@ -4,7 +4,7 @@
 #
 # Args (positional):
 #   $1 archive   -- basename of the transferred repo tarball (unpacked into scratch)
-#   $2 pyenv     -- the cluster uv venv (torch/warpconvnet stack)
+#   $2 pyenv     -- the venv built by gridutils/build_env.sh (the whole stack)
 #   $3 rundir    -- the RUN directory on GPFS: checkpoints/, config.yaml, run_metadata.json
 #   $4 outdir    -- where the feature stores go on GPFS
 #   $5 cache_dir -- base for the warpconvnet benchmark cache and the data index
@@ -64,23 +64,23 @@ export PYTHONUNBUFFERED=1
 
 source "${pyenv}/bin/activate"
 
-# Nothing is installed by this job -- see trainjob.sh for the three ways that goes wrong.
-WCFM_LIBS="${WCFM_LIBS:-/gpfs01/lbne/users/fm/${USER}/wcfm-libs}"
-for pkg in lightning_fabric hydra omegaconf; do
-  if [ ! -d "${WCFM_LIBS}/${pkg}" ]; then
-    echo "FATAL: no ${pkg} at ${WCFM_LIBS}"
-    exit 3
-  fi
-done
-export PYTHONPATH="${WCFM_LIBS}:${repodir}${PYTHONPATH:+:$PYTHONPATH}"
+# Nothing is installed by this job -- see trainjob.sh. Everything is in the venv; the repo is
+# the only thing PYTHONPATH adds, and it is the archive this job unpacked.
+export PYTHONPATH="${repodir}${PYTHONPATH:+:$PYTHONPATH}"
 
 # Stay in scratch, which holds `repo/` and the archive but nothing importable -- see the
 # unpack block at the top.
 cd "${_CONDOR_SCRATCH_DIR:-/tmp}"
 
-python - <<'PY' || { echo "FATAL: wrong torch on the path"; exit 3; }
-import torch
-assert "uvenv" in torch.__file__, f"torch came from {torch.__file__}, not the pinned venv"
+# torch from the venv handed in as $2, `wcfm` from the archive this job unpacked -- see
+# trainjob.sh for why both, and why realpath.
+python - "$pyenv" "$repodir" <<'PY' || { echo "FATAL: wrong environment"; exit 3; }
+import os, sys, torch, wcfm
+pyenv, repodir = (os.path.realpath(p) for p in sys.argv[1:3])
+assert os.path.realpath(torch.__file__).startswith(pyenv), \
+    f"torch came from {torch.__file__}, not the venv at {pyenv}"
+assert os.path.realpath(wcfm.__file__).startswith(repodir), \
+    f"wcfm came from {wcfm.__file__}, not the unpacked archive at {repodir}"
 print(f"torch {torch.__version__} | cuda {torch.cuda.is_available()} "
       f"devices {torch.cuda.device_count()}")
 assert torch.cuda.is_available(), "extraction needs a GPU: warpconvnet's sparse conv is CUDA-only"

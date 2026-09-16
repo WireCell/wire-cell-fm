@@ -4,7 +4,7 @@
 #
 # Args (positional):
 #   $1 archive  -- basename of the transferred repo tarball (unpacked into scratch)
-#   $2 pyenv    -- the cluster uv venv
+#   $2 pyenv    -- the venv built by gridutils/build_env.sh (the whole stack)
 #   $3 dir      -- the run's probes/ directory
 #
 # This node is NOT allowed to fail the DAG (see wcfm/eval/dag.py): the table is a view over the
@@ -42,9 +42,17 @@ echo "  probes dir=${dir}"
 
 export PYTHONUNBUFFERED=1
 source "${pyenv}/bin/activate"
-WCFM_LIBS="${WCFM_LIBS:-/gpfs01/lbne/users/fm/${USER}/wcfm-libs}"
-export PYTHONPATH="${WCFM_LIBS}:${repodir}${PYTHONPATH:+:$PYTHONPATH}"
+# Everything is in the venv; the repo is the only thing PYTHONPATH adds, and it is the archive
+# this job unpacked -- see trainjob.sh.
+export PYTHONPATH="${repodir}${PYTHONPATH:+:$PYTHONPATH}"
 cd "${_CONDOR_SCRATCH_DIR:-/tmp}"
+
+python - "$repodir" <<'PY' || { echo "FATAL: wrong environment"; exit 3; }
+import os, sys, wcfm
+repodir = os.path.realpath(sys.argv[1])
+assert os.path.realpath(wcfm.__file__).startswith(repodir), \
+    f"wcfm came from {wcfm.__file__}, not the unpacked archive at {repodir}"
+PY
 
 shopt -s nullglob
 files=("${dir}"/*.json)

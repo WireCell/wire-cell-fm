@@ -1,4 +1,4 @@
-"""`wcfm sweep`: Hydra enumerates, Condor launches.
+""" wcfm sweep: Hydra enumerates, Condor launches.
 
 One resolved config per point, stamped with `sweep_id`, its overrides and a content hash;
 `run_name` defaults to `<sweep>_<hash8>`, and `sweeps/<id>/manifest.json` maps name to
@@ -18,7 +18,7 @@ The manifest earns its place against diffing the runs' resolved configs, which
 - Which runs were one campaign. A diff over an arbitrary set of runs says what differs; it
   cannot say that these twelve were meant to be read together and that one of them is missing.
 - Which runs are seed replicas. Without a manifest, `--group-by-seed` has to guess replica
-  families by stripping a `_seed\d+` suffix off run names. With `seed_axis` declared here, two
+  families by stripping a `_seed<N>` suffix off run names. With `seed_axis` declared here, two
   points are replicas exactly when every axis except the seed agrees, which is what
   `replica_group` records.
 

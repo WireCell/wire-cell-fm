@@ -88,24 +88,6 @@ def _git(*args: str, cwd: Path) -> str | None:
     return out.stdout.strip()
 
 
-def _check_shared_libs(pyenv: Path, libs: Path, testlibs: Path) -> list[str]:
-    """The job installs nothing, so what it needs has to be there already."""
-    problems: list[str] = []
-    if not (libs / "lightning_fabric").is_dir():
-        problems.append(
-            f"no lightning-fabric at {libs}. Build it once:\n"
-            f"  uv pip install --python {pyenv}/bin/python --target {libs} --no-deps \\\n"
-            f"      'lightning-fabric>=2.6,<3' lightning-utilities"
-        )
-    if not (testlibs / "pytest").is_dir():
-        problems.append(
-            f"no pytest at {testlibs}. Build it once:\n"
-            f"  uv pip install --python {pyenv}/bin/python --target {testlibs} \\\n"
-            f"      pytest 'hydra-core>=1.3.6,<1.4' 'omegaconf>=2.3,<2.4'"
-        )
-    return problems
-
-
 def _dist_cpu(args: list[str]) -> int:
     """The distributed suite here and now, on two CPU ranks over gloo.
 
@@ -193,10 +175,6 @@ def main(argv: list[str]) -> int:
 
     user = os.environ.get("USER", "unknown")
     pyenv = Path(os.environ.get("WCFM_PYENV", f"/gpfs01/lbne/users/fm/{user}/uvenv"))
-    libs = Path(os.environ.get("WCFM_LIBS", f"/gpfs01/lbne/users/fm/{user}/wcfm-libs"))
-    testlibs = Path(
-        os.environ.get("WCFM_TESTLIBS", f"/gpfs01/lbne/users/fm/{user}/wcfm-testlibs")
-    )
     output_base = Path(
         os.environ.get("WCFM_OUTPUT_BASE", f"/gpfs01/lbne/users/fm/{user}/CONDOR_OUT")
     )
@@ -210,9 +188,11 @@ def main(argv: list[str]) -> int:
         print(f"wcfm test: no job script at {job_script}", file=sys.stderr)
         return 2
 
-    if problems := _check_shared_libs(pyenv, libs, testlibs):
-        for problem in problems:
-            print(f"wcfm test: {problem}", file=sys.stderr)
+    # The job installs nothing, so the venv has to carry pytest and the framework before it is
+    # queued, alongside the GPU stack.
+    if not (pyenv / "bin" / "python").is_file():
+        print(f"wcfm test: no venv at {pyenv}. Build it once:\n  gridutils/build_env.sh",
+              file=sys.stderr)
         return 2
 
     if gpus < 2:
@@ -232,7 +212,6 @@ def main(argv: list[str]) -> int:
     dirty = bool(_git("status", "--porcelain", cwd=repo))
     print(f"repo:   {repo} @ {sha}{' (DIRTY)' if dirty else ''}")
     print(f"pyenv:  {pyenv}")
-    print(f"libs:   {libs}  {testlibs}")
     print(f"output: {out_dir}")
     if dirty:
         # Not an error -- iterating on a GPU test with a dirty tree is the normal way to use
@@ -255,7 +234,6 @@ def main(argv: list[str]) -> int:
         p
         for p in (
             "CLUSTER_ID=$(ClusterId) JOB_ID=$(ProcId)",
-            f"WCFM_LIBS={libs} WCFM_TESTLIBS={testlibs}",
             git_environment(repo),
         )
         if p

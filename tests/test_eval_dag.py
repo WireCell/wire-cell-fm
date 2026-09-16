@@ -44,7 +44,6 @@ def _plan(tmp_path, **kw):
         repo=REPO,
         repo_archive=run / "features" / "dag" / "job" / ARCHIVE_NAME,
         pyenv=tmp_path / "uvenv",
-        libs=tmp_path / "libs",
         cache=tmp_path / "cache",
         checkpoints=checkpoints_of(run),
         eval_set_root=run / "features" / "eval_set",

@@ -45,7 +45,8 @@ from pathlib import Path
 __all__ = ["DagPlan", "build_dag", "checkpoints_of", "epoch_of_checkpoint"]
 
 DEFAULT_REQUIREMENTS = os.environ.get(
-    "WCFM_GPU_REQUIREMENTS", '(TARGET.CUDADeviceName =?= "NVIDIA L40S")'
+    "WCFM_GPU_REQUIREMENTS",
+    '(GPUs_DeviceName == "NVIDIA L40S") && (GPUs_Capability == 8.9)',
 )
 
 
@@ -90,7 +91,6 @@ class DagPlan:
     #: node. Written by `wcfm eval submit`; named here so `--dry-run` prints the real `.sub`.
     repo_archive: Path
     pyenv: Path
-    libs: Path
     cache: Path
     checkpoints: list[Path]
     eval_set_root: Path
@@ -130,7 +130,6 @@ def _sub(
     memory: str,
     cpus: str,
     disk: str,
-    libs: Path,
     archive: Path,
     git_env: str,
     initialdir: Path,
@@ -152,7 +151,7 @@ def _sub(
 notification            = never
 executable              = {executable}
 arguments               = "{arguments}"
-environment             = "CLUSTER_ID=$(ClusterId) JOB_ID=$(ProcId) WCFM_LIBS={libs} {git_env}"
+environment             = "CLUSTER_ID=$(ClusterId) JOB_ID=$(ProcId) {git_env}"
 initialdir              = {initialdir}
 +JobBatchName           = "{name}"
 output                  = {log_dir}/{name}.$(ClusterId).out
@@ -232,7 +231,6 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
             memory=plan.request_memory_gpu,
             cpus=plan.request_cpus,
             disk=plan.request_disk_gpu,
-            libs=plan.libs,
             archive=plan.repo_archive,
             git_env=plan.git_env,
             initialdir=plan.out_root,
@@ -254,7 +252,6 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
             memory=plan.request_memory_cpu,
             cpus=plan.request_cpus,
             disk=plan.request_disk_cpu,
-            libs=plan.libs,
             archive=plan.repo_archive,
             git_env=plan.git_env,
             initialdir=plan.out_root,
@@ -285,7 +282,6 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
         memory="4000",
         cpus="1",
         disk=plan.request_disk_cpu,
-        libs=plan.libs,
         archive=plan.repo_archive,
         git_env=plan.git_env,
         initialdir=plan.out_root,
