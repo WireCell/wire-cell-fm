@@ -196,12 +196,18 @@ class Trainer:
             self._load(resume_from)
 
         if self.fabric.is_global_zero:
+            # Imported here rather than at module scope: `collect()` imports torch, warpconvnet
+            # and flash_attn to read their versions, and paying that at `wcfm.engine` import
+            # time would make every CPU-only test drag the GPU stack in.
+            from wcfm.cli.env_check import collect
+
             write_run_dir(
                 self.cfg,
                 self.run_dir,
                 argv=self.argv,
                 world_size=self.world_size,
                 derived=derived,
+                env=collect(),
                 module=self._module_provenance(),
             )
         self.writer = MetricsWriter(
