@@ -4,12 +4,14 @@
 from .base import Term, TermOutput
 from .charge import ChargeTerm
 from .dino import DinoTerm
+from .distill import DistillTerm
 from .gather import gather_at_coords, match_and_gather
 from .heads import DINOProjectionHead
 from .losses import (
     DinoLossOutput,
     PixelDINOLoss,
     charge_loss,
+    distill_loss,
     occupancy_loss,
     two_stage_mean,
 )
@@ -20,11 +22,13 @@ __all__ = [
     "DINOProjectionHead",
     "DinoLossOutput",
     "DinoTerm",
+    "DistillTerm",
     "OccupancyTerm",
     "PixelDINOLoss",
     "Term",
     "TermOutput",
     "charge_loss",
+    "distill_loss",
     "gather_at_coords",
     "occupancy_loss",
     "match_and_gather",

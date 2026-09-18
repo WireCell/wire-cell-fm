@@ -1,4 +1,4 @@
-"""The per-pixel DINO loss and the charge reconstruction loss.
+"""The loss of each term: DINO per pixel, charge reconstruction, occupancy, and distillation.
 
 `PixelDINOLoss` creates its centring buffer eagerly, at construction, from the feature
 dimension the term knows once it has built its head. A buffer created lazily on first use does
@@ -228,3 +228,15 @@ def occupancy_loss(
     p_t = p * target + (1.0 - p) * (1.0 - target)  # probability of the true class
     alpha_t = alpha * target + (1.0 - alpha) * (1.0 - target)
     return two_stage_mean(alpha_t * (1.0 - p_t).pow(gamma) * bce, counts)
+
+
+def distill_loss(pred: Tensor, target: Tensor, counts: Tensor) -> Tensor:
+    """Cosine distance to a teacher's features, per image then over images.
+
+    Direction only: the teacher's feature magnitudes need not be commensurate with the
+    projected student's, so nothing here depends on the two having been trained to the same
+    scale. `F.cosine_similarity` normalises both sides itself.
+    """
+    if pred.numel() == 0:
+        return pred.sum()
+    return two_stage_mean(1.0 - F.cosine_similarity(pred, target, dim=-1), counts)

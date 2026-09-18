@@ -15,6 +15,7 @@ group, each file in it an option:
 ```
 conf/model/dino.yaml       # `model=dino`
 conf/model/hybrid.yaml     # `model=hybrid`
+conf/model/kd.yaml         # `model=kd`
 ```
 
 `wcfm train model=dino optim.lr=3e-4` means: assemble the tree, put `dino.yaml` in the `model`
@@ -38,7 +39,7 @@ merger plus a `_target_` to `__init__` caller.
 
 | Group | Default | Other options | What it is |
 |---|---|---|---|
-| `model/` | `mae` | `dino`, `hybrid` | the training objective |
+| `model/` | `mae` | `dino`, `hybrid`, `kd` | the training objective |
 | `data/` | `prod_jay_200k_mixed_sharded` | `prod_jay_200k_mixed_packed`, `prod_jay_100k` | which production, and how to read it |
 | `optim/` | `adamw_cosine` | — | the optimizer and its schedules |
 | `run/` | `default` | — | name, seed, precision, resume, checkpoint cadence |
@@ -66,7 +67,7 @@ swap any of them without touching the preset.
 | `model/augment/` | `crop_mask`, `mask_only`, `mask_region`, `none` |
 | `model/masker/` | `block`, `pixel`, `region` |
 | `model/teacher/` | `ema`, `none` |
-| `model/term/` | `dino`, `charge`, `occupancy` |
+| `model/term/` | `dino`, `charge`, `occupancy`, `distill` |
 | `model/cropper/` | `default` |
 | `model/normalize/` | `log` |
 

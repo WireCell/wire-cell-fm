@@ -183,6 +183,19 @@ class ChargeTermConfig:
 
 
 @dataclass
+class DistillTermConfig:
+    """`checkpoint` is a `wcfm` checkpoint written by an earlier run; the architecture, the
+    feature width and the charge convention all come out of that file, so none of them is
+    repeated here. `source` picks the branch: the checkpoing might have both student/teacher
+    weights; default to 'student' which is always there."""
+
+    _target_: str = "wcfm.model.terms.DistillTerm"
+    weight: float = 1.0
+    checkpoint: str = MISSING
+    source: str = "student"
+
+
+@dataclass
 class OccupancyTermConfig:
     """`alpha` and `gamma` are the focal-loss knobs. They are exposed rather than fixed at
     0.25/2.0 because the positive rate depends on how the candidate set was built, and this
@@ -229,6 +242,7 @@ GROUPS: tuple[tuple[str, str, type], ...] = (
     ("model/teacher", "base_none", NoTeacherConfig),
     ("model/term", "base_dino", DinoTermConfig),
     ("model/term", "base_charge", ChargeTermConfig),
+    ("model/term", "base_distill", DistillTermConfig),
     ("model/term", "base_occupancy", OccupancyTermConfig),
 )
 

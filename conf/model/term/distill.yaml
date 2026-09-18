@@ -1,0 +1,5 @@
+# Cosine match to a frozen teacher's per-voxel features.
+# The teacher is a wcfm checkpoint: set `checkpoint` to one an earlier run wrote.
+# A distillation run carries this term alone.
+defaults:
+  - base_distill
