@@ -194,6 +194,12 @@ class SslModule(nn.Module):
                     f"{list(self.backbone.inject_roles)}"
                 )
             term.validate(self.backbone, self.augment, has_teacher)
+            # Optional hook, the same shape as `provenance` and `observables`. `Term.validate`
+            # is not handed the charge transform, so a term that has to agree with it -- one
+            # distilling from a checkpoint trained on another production's bounds -- asks here.
+            check = getattr(term, "validate_normalize", None)
+            if check is not None:
+                check(self.normalize)
         if (
             masker is not None
             and masker.requires_full_canvas

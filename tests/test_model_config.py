@@ -37,11 +37,12 @@ def test_the_model_schema_plugin_is_discoverable():
 
 
 def test_the_shipped_presets():
-    assert PRESETS == ["dino", "hybrid", "mae"], (
+    assert PRESETS == ["dino", "hybrid", "kd", "mae"], (
         "`mae` (charge + occupancy, no teacher) arrived with the occupancy term in Stage 4. "
         "`dino_recon` (dino + charge) was dropped on 2026-09-10: it matched no archived run "
         "and nothing had trained it. Adding a charge term to any preset is still one "
-        "override -- see test_a_charge_term_can_be_added_to_a_teacher_preset_and_removed_again."
+        "override -- see test_a_charge_term_can_be_added_to_a_teacher_preset_and_removed_again. "
+        "`kd` (distill alone, no augment, no teacher) arrived with the distill term."
     )
 
 
@@ -91,6 +92,18 @@ def test_mae_is_charge_plus_occupancy_and_injects_both_roles(hydra_all):
     # The term refuses to run on an uncapped candidate set; the preset must not need an
     # override to be usable.
     assert cfg.model.augment.masker.neg_per_pos
+
+
+def test_kd_is_the_distill_term_alone_on_the_whole_image(hydra_all):
+    """The student and the teacher encode the same pixels, so there is no cropper and no
+    masker. `checkpoint` stays MISSING: the preset cannot name a teacher, and a bare
+    `model=kd` is refused at compose rather than trained against nothing."""
+    cfg = compose(config_name="config", overrides=["model=kd", "run.name=t"])
+    assert list(cfg.model.terms) == ["distill"]
+    assert cfg.model.augment.cropper is None
+    assert cfg.model.augment.masker is None
+    assert cfg.model.teacher._target_ == "wcfm.model.modules.NoTeacher"
+    assert OmegaConf.is_missing(cfg.model.terms.distill, "checkpoint")
 
 
 def test_dino_and_hybrid_differ_only_in_score_injected(hydra_all):

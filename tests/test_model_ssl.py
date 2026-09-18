@@ -437,6 +437,7 @@ def test_no_terms_is_refused():
         ("LogTransformConfig", "wcfm.model.augment:FeatureLogTransform"),
         ("EmaTeacherConfig", "wcfm.model.modules:EmaTeacher"),
         ("ChargeTermConfig", "wcfm.model.terms:ChargeTerm"),
+        ("DistillTermConfig", "wcfm.model.terms:DistillTerm"),
         ("DinoTermConfig", "wcfm.model.terms:DinoTerm"),
     ],
 )
