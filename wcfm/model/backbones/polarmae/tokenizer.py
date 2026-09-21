@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from .ops import ball_query, cnms, masked_gather, sample_farthest_points
+from .ops import ball_query, cnms, grid_ball_query, masked_gather, sample_farthest_points
 
 __all__ = [
     "Groups",
@@ -51,9 +51,15 @@ class PointcloudGrouping(nn.Module):
 
     Every retained centre with at least one point becomes a token.
 
-    `context_length` caps the centres per event. Retained centres keep ascending index order,
-    so a truncation drops the highest indices, which on a `(channel, tick)` cloud sorted by
-    channel is one side of the image.
+    `context_length` caps the centres per event; the `T` of a `Groups` is the batch's largest
+    retained count or that cap, whichever is smaller, so it varies from batch to batch. Retained
+    centres keep ascending index order, so a truncation drops the highest indices, which on a
+    `(channel, tick)` cloud sorted by channel is one side of the image.
+
+    `pitch` is the lattice spacing of the cloud in its own units, the backbone's `scale` for a
+    pixel cloud. With it both neighbour queries go through `grid_ball_query`, which returns
+    what `ball_query` returns at a cost that does not grow with the square of the event. It
+    requires distinct lattice sites per event; `grid_ball_query` says what happens otherwise.
     """
 
     def __init__(
@@ -66,6 +72,7 @@ class PointcloudGrouping(nn.Module):
         overlap_factor: float,
         context_length: int,
         reduction_method: str = "fps",
+        pitch: float | None = None,
     ):
         super().__init__()
         if reduction_method not in ("fps", "energy"):
@@ -79,6 +86,14 @@ class PointcloudGrouping(nn.Module):
         self.overlap_factor = float(overlap_factor)
         self.context_length = int(context_length)
         self.reduction_method = reduction_method
+        self.pitch = None if pitch is None else float(pitch)
+
+    def _query(self, p1: Tensor, p2: Tensor, K: int, radius: float, l1: Tensor, l2: Tensor):
+        if self.pitch is None:
+            return ball_query(p1, p2, K=K, radius=radius, lengths1=l1, lengths2=l2)
+        return grid_ball_query(
+            p1, p2, K=K, radius=radius, pitch=self.pitch, lengths1=l1, lengths2=l2
+        )
 
     @torch.no_grad()
     def forward(self, points: Tensor, lengths: Tensor) -> Groups:
@@ -90,17 +105,19 @@ class PointcloudGrouping(nn.Module):
             overlap_factor=self.overlap_factor,
             K=self.num_groups,
             lengths=lengths,
+            pitch=self.pitch,
         )
-        centers = centers[:, : self.context_length]
-        n_centers = n_centers.clamp_max(self.context_length)
-        idx = ball_query(
-            centers,
-            xyz,
-            K=self.group_upscale_points,
-            radius=self.group_radius,
-            lengths1=n_centers,
-            lengths2=lengths,
+        # `cnms` returns every candidate; the batch is padded to its longest event's centres,
+        # not to `context_length`, so the encoder runs over the tokens that exist.
+        T = min(self.context_length, max(int(n_centers.max()), 1))
+        centers = centers[:, :T]
+        n_centers = n_centers.clamp_max(T)
+        idx = self._query(
+            centers, xyz, self.group_upscale_points, self.group_radius, n_centers, lengths
         )
+        # Columns past the fullest group hold only -1; dropping them changes nothing and
+        # shrinks what farthest point sampling iterates over.
+        idx = idx[:, :, : max(int(idx.ge(0).sum(2).max()), self.group_max_points)]
         idx = self._reduce(points, idx)
         K = self.group_max_points
         point_lengths = idx.ge(0).sum(2)
@@ -139,7 +156,7 @@ class PointcloudGrouping(nn.Module):
             f"group_radius={self.group_radius:g}, "
             f"group_upscale_points={self.group_upscale_points}, "
             f"overlap_factor={self.overlap_factor}, context_length={self.context_length}, "
-            f"reduction_method={self.reduction_method!r}"
+            f"reduction_method={self.reduction_method!r}, pitch={self.pitch}"
         )
 
 
