@@ -11,3 +11,8 @@ defaults:
   - /model/term@model.terms.chamfer: chamfer
   - /model/term@model.terms.energy: energy
   - _self_
+
+# Every head runs every step, so DDP's per-step search for unused parameters would find
+# nothing. A term whose head runs only on some steps has to turn it back on.
+launch:
+  find_unused_parameters: false

@@ -9,6 +9,7 @@ devices: 6
 num_nodes: 1    # reaches Fabric(num_nodes=...), keep 1 (no multi-node support yet)
 strategy: ddp   # builds a real DDPStrategy
 
-# These are strong requirements for DDP, do not change
+# DDPStrategy kwargs. The first is needed by any head that runs on only some views of a
+# step; a model preset may turn it off.
 find_unused_parameters: true
 static_graph: false

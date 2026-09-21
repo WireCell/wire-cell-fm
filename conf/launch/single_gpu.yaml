@@ -11,6 +11,5 @@ num_nodes: 1    # reaches Fabric(num_nodes=...), keep 1 (no multi-node support y
 strategy: ddp   # inert at one GPU: trainer.py:122 forces "auto". Left as the default
 
 # Also inert at one GPU -- these are DDPStrategy kwargs and no DDPStrategy is built here.
-# left as the default for multi-GPU runs, where they are strong requirements.
 find_unused_parameters: true
 static_graph: false

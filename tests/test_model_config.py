@@ -297,3 +297,13 @@ def test_every_experiment_composes(hydra_all, experiment):
     cfg = compose(config_name="config", overrides=[f"+experiment={experiment}"])
     assert cfg.model is not None and cfg.data is not None
     assert str(cfg.model._target_).endswith(("SslModule", "PointMaeModule"))
+
+
+def test_polarmae_turns_find_unused_parameters_off(hydra_all):
+    """`PointMaeModule.forward` runs every head every step, so its preset drops the per-step
+    graph traversal the pixel presets rely on. The pixel presets keep it."""
+    off = compose(config_name="config", overrides=["model=polarmae", "run.name=t"])
+    assert off.launch.find_unused_parameters is False
+    for preset in ("mae", "dino", "hybrid"):
+        on = compose(config_name="config", overrides=[f"model={preset}", "run.name=t"])
+        assert on.launch.find_unused_parameters is True, preset

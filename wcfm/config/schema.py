@@ -147,8 +147,8 @@ class LaunchConfig:
     devices: int = 1
     num_nodes: int = 1
     strategy: str = "ddp"
-    # Required. A head that runs on only some views receives no gradient on the others, and
-    # without this DDP leaves that bucket unfinished and performs no reduction at all.
+    # A head that runs on only some views leaves its bucket unreduced without this. A model
+    # preset whose forward uses every parameter every step may set it False.
     find_unused_parameters: bool = True
     static_graph: bool = False
 

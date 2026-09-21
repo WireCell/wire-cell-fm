@@ -25,6 +25,10 @@ Consequences to hold in mind when changing either side:
   trainable runs inside that one `forward`; a head applied outside it is marked unused, then
   receives a gradient, and DDP raises.
 - `Term.compute` is parameter-free; a term's heads are built eagerly in `build()`.
+- `launch.find_unused_parameters` is on because a head that runs on only some views of a step
+  leaves its bucket unreduced without it. A model whose forward uses every parameter every
+  step turns it off in its own preset, as `conf/model/polarmae.yaml` does, and turns it back
+  on the day it grows a head that runs only on some steps.
 - `run.precision` is an autocast and nothing more: `build_fabric` installs
   `AutocastOnlyPrecision` so a forward receives its arguments in the dtype the caller passed.
   Geometry that has to stay exact under autocast still disables it locally, as
@@ -91,9 +95,12 @@ Leave changes in the working tree; the user reviews diffs and commits.
 - Resources are environment variables on the submit: `WCFM_REQUEST_MEMORY` (MB),
   `WCFM_REQUEST_CPUS`, `WCFM_OUTPUT_BASE`. The login shell is tcsh; set them inline,
   `env WCFM_PYENV=... wcfm submit ...`.
-- A run rsyncs scratch to GPFS every 300 s and, on restart, restores the newest checkpoint and
-  the two metrics streams first. Resubmitting under an existing `run.name` therefore resumes;
-  delete the run directory or pick a new name to start over.
+- A run rsyncs scratch to GPFS every 300 s, once more from its exit trap, and on restart
+  restores the newest checkpoint and the two metrics streams first. Resubmitting under an
+  existing `run.name` therefore resumes. To start over: `condor_rm`, wait until the job has
+  left `condor_q` and its `.log` says "Job was aborted", then delete the run directory, then
+  submit. A directory deleted while the job is still exiting is recreated by that last sync,
+  and the new job resumes the old run in silence.
 - Extraction is one process and takes the per-rank batch: warpconvnet refuses more than 512
   images in one forward. `wcfm eval submit` builds a DAG (`extract -> probes` per checkpoint,
   one `merge`); clear DAGMan's `eval.dag.*` files before resubmitting to extend a campaign.
