@@ -199,7 +199,7 @@ def grid_ball_query(
     function raises when the count disagrees. And a coordinate has to round to its site, so
     `p / pitch` must be within 0.5 of an integer.
     `tests/test_model_polarmae_ops.py::test_grid_ball_query_matches_ball_query` pins the
-    equality, and `polarmae-oracle/ballquery_oracle.py` checks it against pytorch3d's kernel.
+    equality.
     """
     with torch.autocast(device_type=p1.device.type, enabled=False):
         p1 = p1.float()
@@ -341,11 +341,10 @@ def cnms(
     unresolved candidate that no unresolved candidate of higher count can still suppress, then
     suppresses their balls. The retained set equals the sequential visit's, and the number of
     rounds is the depth of the suppression chain rather than the number of centres.
-    `tests/test_model_polarmae_ops.py` pins the equality against a sequential reference, and
-    `polarmae-oracle/ballquery_oracle.py` against the compiled kernel PoLAr-MAE trains with:
-    the retained set is the kernel's under a stable candidate order. The kernel's own caller
-    sorts the counts unstably, and most counts tie, so its set is not reproducible even
-    between its CPU and GPU.
+    `tests/test_model_polarmae_ops.py` pins the equality against a sequential reference. The
+    retained set is what PoLAr-MAE's compiled kernel produces under a stable candidate order;
+    that kernel's own caller sorts the counts unstably, and most counts tie, so its set is not
+    reproducible even between its CPU and GPU.
     """
     B, P, D = centroids.shape
     device = centroids.device
