@@ -186,6 +186,12 @@ class GradNorm(Collector):
     module may define `grad_taxonomy() -> dict[str, tuple[str, ...]]` mapping a group name to
     parameter-name prefixes. Without one, parameters are grouped by their first path token.
 
+    Keys are `<group>/grad_norm` and `<group>/grad_to_param` every firing, and on a step that
+    is a multiple of `dump_per_parameter_every`, `<group>/param/<name>/grad_norm` for each
+    parameter, where `<name>` is the parameter's name with the matched group prefix removed.
+    Nesting the dump under the group is what lets a reader of the stream draw one panel per
+    group with a line per parameter without knowing the taxonomy.
+
     `reduce` is empty, and that is a claim worth checking. These gradients are read from
     `.grad` after backward, so DDP's own all-reduce has already run and every rank holds the
     same values -- including for a parameter skipped this iteration, which
@@ -227,10 +233,11 @@ class GradNorm(Collector):
                 continue
             if not self.include_bias_and_norm and _is_bias_or_norm(name):
                 continue
-            group = _group_of(name, taxonomy)
+            group, prefix = _group_and_prefix(name, taxonomy)
             groups.setdefault(group, []).append((name, param.detach(), param.grad.detach()))
             if dumping:
-                per_parameter[name] = float(param.grad.detach().norm())
+                short = name[len(prefix) :].lstrip(".") or name
+                per_parameter[f"{group}/param/{short}"] = float(param.grad.detach().norm())
 
         out: dict[str, float | np.ndarray] = {}
         for group, entries in sorted(groups.items()):
@@ -241,8 +248,8 @@ class GradNorm(Collector):
             # The ratio is what says whether a group is learning: a norm of 1e-3 means
             # nothing until you know whether the weights are 1e-1 or 1e-6.
             out[f"{group}/grad_to_param"] = grad_norm / param_sq**0.5 if param_sq > 0 else 0.0
-        for name, norm in per_parameter.items():
-            out[f"param/{name}/grad_norm"] = norm
+        for key, norm in per_parameter.items():
+            out[f"{key}/grad_norm"] = norm
         return out
 
 
@@ -325,24 +332,29 @@ def _is_bias_or_norm(name: str) -> bool:
     return any(token in lowered for token in _NORM_TOKENS)
 
 
-def _group_of(name: str, taxonomy: dict[str, tuple[str, ...]] | None) -> str:
-    """Which reported group a parameter name belongs to. Longest prefix wins.
+def _group_and_prefix(name: str, taxonomy: dict[str, tuple[str, ...]] | None) -> tuple[str, str]:
+    """The reported group a parameter name belongs to, and the prefix that matched it.
 
-    Nesting then means the obvious thing: a more specific prefix beats a more general one. On
-    first match in declaration order,
+    Longest prefix wins. Nesting then means the obvious thing: a more specific prefix beats a
+    more general one. On first match in declaration order,
     `{"backbone": ("model.student",), "head": ("model.student_head",)}` sends every head
     parameter to `backbone`, since `"model.student_head.weight"` starts with `"model.student"`
     -- the head group reports nothing and the backbone norm quietly averages the head into
     itself. Where the prefixes are disjoint the two rules agree.
+
+    Without a taxonomy the group is the first path token and the prefix is that token, so the
+    per-parameter dump still strips it. A name no prefix matches lands in `other` with an
+    empty prefix.
     """
     if taxonomy:
-        best_group, best_len = "other", -1
+        best_group, best_prefix = "other", ""
         for group, prefixes in taxonomy.items():
             for prefix in prefixes:
-                if name.startswith(prefix) and len(prefix) > best_len:
-                    best_group, best_len = group, len(prefix)
-        return best_group
-    return name.split(".")[0]
+                if name.startswith(prefix) and len(prefix) > len(best_prefix):
+                    best_group, best_prefix = group, prefix
+        return best_group, best_prefix
+    head = name.split(".")[0]
+    return head, head
 
 
 def _as_rows(tensor: Tensor) -> Tensor | None:

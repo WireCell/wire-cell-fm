@@ -40,7 +40,10 @@ Read `conf/README.md` before changing anything here. The conventions:
 - A term is added with `+model/term@model.terms.X=X` and removed with `~model.terms.X`. A
   preset that only adds one term earns no file.
 - `hydra.job.chdir` stays false: the Condor job manages its own working directory.
-- Everything a run writes goes under `<output_root>/<name>/{checkpoints,debug,probes,features,metrics}`.
+- Everything a run writes goes under
+  `<output_root>/<name>/{checkpoints,debug,probes,features,metrics}`. `wcfm plot` adds `plots/`,
+  which holds no data: every figure is a view over the metrics streams and the probe JSONs, it
+  rebuilds in seconds, and no job writes or syncs it.
 
 ## Training
 

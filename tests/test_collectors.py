@@ -285,10 +285,11 @@ def test_the_per_parameter_dump_has_its_own_longer_cadence():
     collector = GradNorm(cadence="step", dump_per_parameter_every=10)
 
     off = collector.compute(_record(net, step=3))
-    assert not any(k.startswith("param/") for k in off)
+    assert not any("/param/" in k for k in off)
 
     on = collector.compute(_record(net, step=20))
-    assert "param/encoder.weight/grad_norm" in on
+    # Nested under the group, with the group prefix stripped from the parameter name.
+    assert "encoder/param/weight/grad_norm" in on
 
 
 def test_gradnorm_declares_no_reduction_because_ddp_already_agreed():

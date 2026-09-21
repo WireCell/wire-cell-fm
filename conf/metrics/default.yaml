@@ -22,6 +22,7 @@ collectors:
   gradnorm:
     _target_: wcfm.metrics.collectors.GradNorm
     cadence: 100  # every 100 steps
+    dump_per_parameter_every: 100
 
   # Participation ratio, RankMe, top-k eigenvalues, condition number, variance and row-norm order statistics.
   # This is the collapse detector, i.e. a representation folding to a few directions.

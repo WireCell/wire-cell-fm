@@ -11,6 +11,7 @@ COMMANDS = {
     "sweep": "wcfm.cli.sweep",
     "metrics": "wcfm.cli.metrics",
     "eval": "wcfm.cli.eval",
+    "plot": "wcfm.cli.plot",
     "diff": "wcfm.cli.diff",
     "test": "wcfm.cli.test_gpu",
 }

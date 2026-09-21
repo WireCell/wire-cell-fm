@@ -12,7 +12,7 @@ import ast
 from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "wcfm"
-FRAMEWORK = ("config", "data", "engine", "metrics", "eval", "cli")
+FRAMEWORK = ("config", "data", "engine", "metrics", "eval", "cli", "plotting")
 
 
 def _module_name(path: Path) -> str:

@@ -102,6 +102,7 @@ Same entry point, one process per rank.
 | `sweep` | Hydra enumerates, Condor launches. The full sweep syntax works: `a,b`, `range(1,4)`, `choice(a,b)`, `glob(*)` |
 | `metrics` | Read the stream back out: `wcfm metrics summary <run_dir>` |
 | `eval` | The offline pipeline: `extract`, `probe`, `merge`, `compare`, and `submit` for the whole DAG |
+| `plot` | Figures over the metrics streams and the probe JSONs: `wcfm plot <run_dir>`, several run directories to overlay them |
 | `diff` | What two runs actually differ by — configs, and with `--code` the source trees they executed |
 | `test` | The suites a CPU cannot run: `--dist-cpu` runs the distributed suite locally on 2 CPU ranks, `--gpu` submits the GPU suites to Condor |
 
@@ -110,6 +111,8 @@ wcfm train model=hybrid run.name=demo optim.lr=3e-4   # train here
 wcfm submit model=dino run.name=demo --smoke          # a short queued run
 wcfm sweep model=dino,hybrid run.seed=range(1,4) --id seeds
 wcfm eval submit runs/demo                            # extract -> probes -> merge
+wcfm plot runs/demo                                   # diagnostics + probes -> runs/demo/plots
+wcfm plot runs/a runs/b --out-dir=cmp                 # the same panels, one colour per run
 wcfm diff runs/a runs/b --code
 ```
 
