@@ -1,6 +1,6 @@
 """PoLAr-MAE as a `wcfm` backbone: point-set ops, tokenizer, masked ViT, and the `Backbone`."""
 
-from .backbone import LOCAL_DIM, PolarMAEBackbone, TokenBundle, random_token_mask
+from .backbone import LOCAL_DIM, MaskedTokens, PolarMAEBackbone, TokenBundle, random_token_mask
 from .tokenizer import Groups, MaskedMiniPointNet, PointcloudGrouping, PointcloudTokenizer
 from .transformer import LearnedPositionalEncoder, Transformer
 
@@ -9,6 +9,7 @@ __all__ = [
     "Groups",
     "LearnedPositionalEncoder",
     "MaskedMiniPointNet",
+    "MaskedTokens",
     "PointcloudGrouping",
     "PointcloudTokenizer",
     "PolarMAEBackbone",

@@ -225,6 +225,21 @@ class DistillTermConfig:
 
 
 @dataclass
+class ChamferTermConfig:
+    """`channels` is 4 to rebuild `(x, y, z, log_q)` per point, 3 for positions alone."""
+
+    _target_: str = "wcfm.model.terms.ChamferTerm"
+    weight: float = 1.0
+    channels: int = 4
+
+
+@dataclass
+class EnergyTermConfig:
+    _target_: str = "wcfm.model.terms.EnergyTerm"
+    weight: float = 1.0
+
+
+@dataclass
 class OccupancyTermConfig:
     """`alpha` and `gamma` are the focal-loss knobs. They are exposed rather than fixed at
     0.25/2.0 because the positive rate depends on how the candidate set was built, and this
@@ -258,8 +273,25 @@ class SslModuleConfig:
     observe_taps: list[str] = field(default_factory=list)
 
 
+@dataclass
+class PointMaeModuleConfig:
+    """The composition root of the Point-MAE model axis: a `PolarMAEBackbone`, `GroupTerm`s
+    keyed by name, and the token mask ratio. `max_points` and `charge_threshold` thin each
+    event before tokenisation and are off by default."""
+
+    _target_: str = "wcfm.model.modules.PointMaeModule"
+    _convert_: str = "all"
+    backbone: Any = MISSING
+    terms: dict[str, Any] = field(default_factory=dict)
+    normalize: Any = None
+    mask_ratio: float = 0.6
+    max_points: int | None = None
+    charge_threshold: float | None = None
+
+
 GROUPS: tuple[tuple[str, str, type], ...] = (
     ("model/module", "ssl", SslModuleConfig),
+    ("model/module", "pointmae", PointMaeModuleConfig),
     ("model/backbone", "base_minkunet", MinkUNetConfig),
     ("model/backbone", "base_polarmae", PolarMAEConfig),
     ("model/masker", "base_pixel", PixelMaskerConfig),
@@ -274,6 +306,8 @@ GROUPS: tuple[tuple[str, str, type], ...] = (
     ("model/term", "base_charge", ChargeTermConfig),
     ("model/term", "base_distill", DistillTermConfig),
     ("model/term", "base_occupancy", OccupancyTermConfig),
+    ("model/term", "base_chamfer", ChamferTermConfig),
+    ("model/term", "base_energy", EnergyTermConfig),
 )
 
 

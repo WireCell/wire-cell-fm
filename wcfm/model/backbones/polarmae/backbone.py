@@ -9,7 +9,8 @@ checkpoint carries them whichever module wrote it.
 
 A pixel `(channel, tick)` with normalised charge `q` becomes
 `((channel - center[0]) * scale, (tick - center[1]) * scale, 0, q)`. `group_radius_px` is in
-pixels and is multiplied by `scale` before it reaches the grouping.
+pixels and is multiplied by `scale` before it reaches the grouping, and `scale` is the
+grouping's lattice `pitch`, so its neighbour queries run on an index image of the pixels.
 
 `inject_roles` is empty, so the objectives that reinject coordinates refuse this backbone at
 validation; the DINO and distillation objectives and extraction take it as it is.
@@ -31,7 +32,7 @@ from .ops import knn_points
 from .tokenizer import Groups, PointcloudGrouping, PointcloudTokenizer
 from .transformer import NORMS, LearnedPositionalEncoder, Transformer
 
-__all__ = ["PolarMAEBackbone", "TokenBundle", "random_token_mask"]
+__all__ = ["MaskedTokens", "PolarMAEBackbone", "TokenBundle", "random_token_mask"]
 
 LOCAL_DIM = 256
 """Width of the mini-PointNet's per-point feature, fixed by `MaskedMiniPointNet.first_conv`."""
@@ -55,6 +56,23 @@ class TokenBundle:
     def lengths(self) -> Tensor:
         """Real tokens per event, `(B,)`."""
         return self.groups.emb_mask.sum(1)
+
+
+@dataclass
+class MaskedTokens:
+    """One masked pass over a `TokenBundle`: what a `GroupTerm` scores.
+
+    `masked` and `visible` are `(B, T)` bool and partition the real tokens. `encoded` is the
+    encoder over the visible tokens, `decoded` the decoder over every real token with
+    `mask_token` in the masked slots; both are `(B, T, D)` and hold nothing meaningful at
+    padded positions.
+    """
+
+    bundle: TokenBundle
+    masked: Tensor
+    visible: Tensor
+    encoded: Tensor
+    decoded: Tensor
 
 
 @torch.no_grad()
@@ -148,6 +166,7 @@ class PolarMAEBackbone(Backbone):
             overlap_factor=overlap_factor,
             context_length=context_length,
             reduction_method=reduction_method,
+            pitch=self.scale,
         )
         self.tokenizer = PointcloudTokenizer(grouping=grouping, num_channels=4, token_dim=embed_dim)
         self.pos_embed = LearnedPositionalEncoder(embed_dim)

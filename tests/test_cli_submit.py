@@ -107,6 +107,10 @@ def test_the_job_transfers_an_archive_and_returns_no_files(env, conf_dir):
     assert f"transfer_input_files    = {archive}" in text
     assert 'transfer_output_files   = ""' in text
     assert "when_to_transfer_output = ON_EXIT" in text
+    # Streaming appends stdout and stderr to the `.out` and `.err` files on GPFS while the
+    # job runs; without it Condor holds both on the worker until exit.
+    assert "stream_output           = True" in text
+    assert "stream_error            = True" in text
     # The job is told the archive's NAME: it unpacks it from its own scratch directory, and a
     # path into the checkout would not exist there.
     assert 'arguments               = "repo.tgz ' in text

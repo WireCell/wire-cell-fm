@@ -1,0 +1,29 @@
+# @package _global_
+#
+# `polarmae_pm4w` on six ranks. The per-rank batch stays 16, so the global batch is 96 and the
+# 13 epochs are 27,000 optimizer steps instead of 80,000; the learning rate scales with the
+# square root of the batch ratio (9.9e-5 * sqrt(3)), which is the rule pm4_w itself applied
+# going from batch 16 to 32, and the warmup stays 1000 steps.
+#
+#   WCFM_REQUEST_MEMORY=64000 WCFM_REQUEST_CPUS=24 \
+#     wcfm submit +experiment=polarmae_pm4w_ddp6
+#
+# Everything not set below comes from polarmae_pm4w and then the schema.
+
+defaults:
+  - polarmae_pm4w
+  - override /launch: multi_6gpu
+  - _self_
+
+run:
+  name: wcfm_polarmae_pm4w_ddp6
+  num_workers: 4          # 6 x 4 = the 24 CPUs the job asks for
+
+data:
+  global_batch_size: 96   # per-rank 16 on six ranks
+
+optim:
+  lr: 1.7e-4
+  schedules:
+    lr:
+      warmup_epochs: 0.48   # 1000 steps of 2082 per epoch

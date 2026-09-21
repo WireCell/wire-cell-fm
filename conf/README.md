@@ -39,7 +39,7 @@ merger plus a `_target_` to `__init__` caller.
 
 | Group | Default | Other options | What it is |
 |---|---|---|---|
-| `model/` | `mae` | `dino`, `hybrid`, `kd` | the training objective |
+| `model/` | `mae` | `dino`, `hybrid`, `kd`, `polarmae` | the training objective |
 | `data/` | `prod_jay_200k_mixed_sharded` | `prod_jay_200k_mixed_packed`, `prod_jay_100k` | which production, and how to read it |
 | `optim/` | `adamw_cosine` | — | the optimizer and its schedules |
 | `run/` | `default` | — | name, seed, precision, resume, checkpoint cadence |
@@ -59,7 +59,9 @@ The two `200k_mixed` blocks are the *same events*, so a run can change reader wi
 what it trains on. `packed` needs `request_memory` well above `wcfm submit`'s 32 GB default.
 
 A `model/` preset is itself a recipe: it selects one option from each sub-group below. You can
-swap any of them without touching the preset.
+swap any of them without touching the preset. `polarmae` is the one preset on a different
+module, `pointmae`: it masks tokens of a point cloud rather than pixels, so it selects no
+augment and no teacher, and its two terms run only under it.
 
 | Sub-group | Options |
 |---|---|
@@ -67,7 +69,7 @@ swap any of them without touching the preset.
 | `model/augment/` | `crop_mask`, `mask_only`, `mask_region`, `none` |
 | `model/masker/` | `block`, `pixel`, `region` |
 | `model/teacher/` | `ema`, `none` |
-| `model/term/` | `dino`, `charge`, `occupancy`, `distill` |
+| `model/term/` | `dino`, `charge`, `occupancy`, `distill`; `chamfer`, `energy` under `polarmae` |
 | `model/cropper/` | `default` |
 | `model/normalize/` | `log` |
 

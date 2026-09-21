@@ -1,9 +1,10 @@
 """The occupancy term: at each candidate coordinate, is there a voxel there or not?
 
-Supervised entirely by the input. The masker enumerates candidates and labels each one
-positive exactly when it coincides with a voxel masking removed (`label_candidates` in
-`augment/masking.py`); the term asks the backbone to inject a `candidate` token at those
-coordinates, reads a 1x1 head on the half-resolution decoder output, and takes a focal BCE.
+The pixel MAE cannot ask its decoder for points that are not in its geometry, so the masker
+enumerates candidate coordinates up front and labels each one positive exactly when it
+coincides with a voxel masking removed (`label_candidates` in `augment/masking.py`); the term
+asks the backbone to inject a `candidate` token at those coordinates, reads a 1x1 head on the
+half-resolution decoder output, and takes a focal BCE. Supervised entirely by the input.
 
 It reads `dec_half` rather than `out`. `READ_TAP` and `READ_STRIDE` together ask one question
 per 2x2 block of full-resolution pixels, and the candidate coordinates are in those units.
@@ -24,6 +25,9 @@ surviving voxel is already in the geometry and is not re-injected, and after cro
 fall outside the crop entirely. Those are conditions rather than bugs, and they are not silent
 either -- the term intersects its labelled candidates against what the backbone reports it
 placed, and counts every survivor it had to drop into `occ_dropped`.
+
+`ChamferTerm` asks the where-question of PoLAr-MAE, where the decoder emits one token per
+masked group and the head predicts the group's points as a set, scored by Chamfer distance.
 """
 
 from __future__ import annotations

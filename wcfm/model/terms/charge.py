@@ -1,10 +1,12 @@
-"""The charge term: regress the (log-space) charge at the pixels masking removed.
+"""The charge term: regress the log-charge of every pixel the masker removed.
 
-Supervised entirely by the input, with no teacher. It requests injection of the `masked` role
-at every skip so the decoder emits a feature at each removed coordinate, reads its 1x1 head
-there (inside the wrapped forward, through `head_forward`), and takes an L1 against the
-masker's `masked_feats`, which are already normalised because the transform runs before the
-masker.
+The masker removes whole pixels, so the network has no input at those coordinates and the
+question is asked one pixel at a time. The term requests injection of the `masked` role at
+every stride-1 skip so the decoder emits a feature at each removed coordinate, reads a 1x1
+head there (inside the wrapped forward, through `head_forward`), and takes an L1 against the
+masker's `masked_feats`, normalised per image and then across images. The targets are already
+in the normaliser's log space because the transform runs before the masker. Supervised
+entirely by the input, with no teacher.
 
 The gather is `on_miss="raise"`: every masked coordinate is injected at the full-resolution
 skip and the decoder's output geometry is that skip's, so a miss is a bug in the backbone
@@ -12,7 +14,12 @@ rather than a condition to absorb.
 
 A charge head and a DINO term have never trained together, so this combination has no
 reference loss curve to be judged against and is gated on probe numbers instead.
+
+`EnergyTerm` asks the same question of PoLAr-MAE, where masking removes whole groups and the
+decoder emits one token per group: its head predicts a charge for every slot of the group from
+the token and the group's point positions, with an MSE.
 """
+
 
 from __future__ import annotations
 

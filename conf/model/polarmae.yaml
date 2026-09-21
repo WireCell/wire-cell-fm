@@ -1,0 +1,13 @@
+# @package _global_
+# PoLAr-MAE: a point-cloud MAE over the PoLAr-MAE backbone. Each event's pixels are grouped
+# into tokens, 60% of the tokens are hidden, and two terms rebuild the hidden groups from the
+# decoder's output: their points (chamfer) and their charge (energy). Whole images go in;
+# there is no cropper, no masker and no teacher, so `model/augment` and `model/teacher` do not
+# appear here.
+defaults:
+  - /model/module@model: pointmae
+  - /model/backbone: polarmae
+  - /model/normalize: log
+  - /model/term@model.terms.chamfer: chamfer
+  - /model/term@model.terms.energy: energy
+  - _self_

@@ -1,0 +1,4 @@
+# Rebuild the points of every masked group from its decoded token; Chamfer distance.
+# Runs under model/module=pointmae only.
+defaults:
+  - base_chamfer
