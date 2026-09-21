@@ -630,6 +630,36 @@ def test_the_configured_precision_reaches_the_model(tmp_path):
     )
 
 
+def test_mixed_precision_leaves_the_inputs_alone(tmp_path):
+    """Fabric's own `MixedPrecision` casts the wrapper's floating inputs to the half type
+    before the forward, on top of the autocast. `build_fabric` installs
+    `AutocastOnlyPrecision` instead: the forward must see autocast enabled and its arguments
+    in the dtype the caller passed. A point cloud's coordinates are floats of order one, and
+    a bfloat16 cast of them moves pixels by up to a few pitches."""
+    from wcfm.engine.trainer import build_fabric
+
+    seen: set[tuple[torch.dtype, bool, torch.dtype]] = set()
+
+    class Recording(ToyModule):
+        def forward(self, x):
+            out = super().forward(x)
+            seen.add((x.dtype, *self._autocast))
+            return out
+
+    Trainer(
+        cfg(tmp_path, optim__epochs=1, run__precision="bf16-mixed"),
+        Recording(),
+        fabric=build_fabric(cfg(tmp_path, run__precision="bf16-mixed")),
+        loader=toy_loader(steps=2),
+        run_dir=tmp_path / "amp_inputs_run",
+    ).fit()
+
+    assert seen == {(torch.float32, True, torch.bfloat16)}, (
+        f"the forward saw (input dtype, autocast) = {seen}; expected float32 inputs under a "
+        "bfloat16 autocast"
+    )
+
+
 def test_fp32_really_has_no_autocast(tmp_path):
     """The control for the test above: at ``32-true`` -- now the default -- there must be no
     autocast, so a pass at ``bf16-mixed`` cannot be an accident of always-on autocast, and the

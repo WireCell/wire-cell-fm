@@ -1,4 +1,4 @@
-"""This is the main training loop, on Lightning Fabric. 
+"""This is the main training loop, on Lightning Fabric.
 It owns everything about running a job and knows nothing about what is being trained.
 
 Procedure:
@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from lightning_fabric.plugins.precision.amp import MixedPrecision
 from omegaconf import DictConfig, OmegaConf
 
 from wcfm.config.io import derive, write_run_dir
@@ -58,6 +59,23 @@ from wcfm.metrics.writer import MetricsWriter
 log = logging.getLogger(__name__)
 
 __all__ = ["Trainer", "build_fabric"]
+
+
+class AutocastOnlyPrecision(MixedPrecision):
+    """`16-mixed` and `bf16-mixed` as an autocast around the forward and nothing else.
+
+    Fabric's `MixedPrecision.convert_input` casts every floating tensor the wrapper's forward
+    receives to the half type before the forward runs, reaching into dataclasses such as
+    `Voxels` and a model's own arguments. A coordinate of order one in bfloat16 has a spacing of
+    two to five pixels, which is what a point cloud sees when `ctx.module(points, lengths)`
+    is called under it; a charge feature loses its low bits the same way. Autocast alone casts
+    the operands of matmuls and convolutions and leaves everything else in the dtype it
+    arrived in, which is the behaviour `run.precision` promises.
+    `tests/test_engine.py::test_mixed_precision_leaves_the_inputs_alone` pins it.
+    """
+
+    def convert_input(self, data: Any) -> Any:
+        return data
 
 
 def build_fabric(cfg: DictConfig) -> Any:
@@ -104,12 +122,17 @@ def build_fabric(cfg: DictConfig) -> Any:
         strategy = "auto"
 
     accelerator = "cuda" if torch.cuda.is_available() else "cpu"
+    precision = str(cfg.run.precision)
+    kwargs: dict[str, Any] = {"precision": precision}
+    if precision in ("16-mixed", "bf16-mixed"):
+        # Fabric refuses `precision=` together with a precision plugin.
+        kwargs = {"plugins": [AutocastOnlyPrecision(precision, accelerator)]}
     return Fabric(
         accelerator=accelerator,
         devices=devices,
         num_nodes=int(cfg.launch.num_nodes),
         strategy=strategy,
-        precision=str(cfg.run.precision),
+        **kwargs,
     )
 
 
@@ -337,9 +360,7 @@ class Trainer:
             # Nothing to do: a finished run resumed with `resume: auto`, or one resumed
             # with fewer `optim.epochs` than the checkpoint reached. A re-submitted sweep
             # hits the first every time, so this returns and says which epoch it found.
-            self.fabric.print(
-                f"nothing to do: resumed at epoch {self.start_epoch} of {epochs}"
-            )
+            self.fabric.print(f"nothing to do: resumed at epoch {self.start_epoch} of {epochs}")
             self.writer.close()
             return {
                 "epochs_run": 0,
