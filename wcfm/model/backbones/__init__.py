@@ -10,6 +10,7 @@ from .base import (
     project_coords,
 )
 from .minkunet import MinkUNetAttention
+from .polarmae import PolarMAEBackbone
 
 __all__ = [
     "ROLES",
@@ -18,6 +19,7 @@ __all__ = [
     "Injection",
     "InjectionGroup",
     "MinkUNetAttention",
+    "PolarMAEBackbone",
     "inject_into_skip",
     "project_coords",
 ]

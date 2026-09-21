@@ -193,6 +193,27 @@ def test_the_old_backbone_registry_is_reachable_as_flags(hydra_all):
         assert OmegaConf.to_container(cfg.model.backbone)[key] == value, override
 
 
+def test_the_polarmae_backbone_is_an_option_on_the_backbone_group(hydra_all):
+    """`model/backbone=polarmae` swaps the backbone under any preset; the defaults come from
+    `PolarMAEConfig`, so the yaml lists none."""
+    cfg = compose(
+        config_name="config", overrides=["model=dino", "model/backbone=polarmae", "run.name=t"]
+    )
+    bb = OmegaConf.to_container(cfg.model.backbone)
+    assert bb["_target_"] == "wcfm.model.backbones.PolarMAEBackbone"
+    assert bb["overlap_factor"] == 0.5 and bb["norm"] == "layer"
+    with pytest.raises((ValidationError, ConfigCompositionException), match="context_length"):
+        compose(
+            config_name="config",
+            overrides=[
+                "model=dino",
+                "model/backbone=polarmae",
+                "model.backbone.context_length=long",
+                "run.name=t",
+            ],
+        )
+
+
 def test_augment_options(hydra_all):
     cfg = compose(
         config_name="config", overrides=["model=dino", "model/augment=mask_only", "run.name=t"]

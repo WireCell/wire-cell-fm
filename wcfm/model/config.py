@@ -50,6 +50,35 @@ class MinkUNetConfig:
     inject_roles: list[str] = field(default_factory=lambda: ["masked"])
 
 
+@dataclass
+class PolarMAEConfig:
+    """`wcfm.model.backbones.PolarMAEBackbone`. `center`, `scale` and `group_radius_px`
+    describe the `(channel, tick)` canvas; `overlap_factor` sets group coverage; `norm`
+    selects the normalisation, `layer` per token or `global` over the batch as the published
+    PoLAr-MAE checkpoints do."""
+
+    _target_: str = "wcfm.model.backbones.PolarMAEBackbone"
+    center: list[float] = field(default_factory=lambda: [480.0, 563.0, 0.0])
+    scale: float = 1.0 / 600.0
+    group_radius_px: float = 5.0
+    num_init_groups: int = 256
+    context_length: int = 512
+    group_max_points: int = 32
+    group_upscale_points: int = 256
+    overlap_factor: float = 0.5
+    reduction_method: str = "fps"
+    embed_dim: int = 384
+    depth: int = 12
+    num_heads: int = 6
+    mlp_ratio: float = 4.0
+    qkv_bias: bool = True
+    attn_drop: float = 0.05
+    drop_path: float = 0.25
+    decoder_depth: int = 4
+    norm: str = "layer"
+    upsample_k: int = 5
+
+
 # --------------------------------------------------------------------------------- augment
 
 
@@ -232,6 +261,7 @@ class SslModuleConfig:
 GROUPS: tuple[tuple[str, str, type], ...] = (
     ("model/module", "ssl", SslModuleConfig),
     ("model/backbone", "base_minkunet", MinkUNetConfig),
+    ("model/backbone", "base_polarmae", PolarMAEConfig),
     ("model/masker", "base_pixel", PixelMaskerConfig),
     ("model/masker", "base_block", BlockMaskerConfig),
     ("model/masker", "base_region", RegionMaskerConfig),

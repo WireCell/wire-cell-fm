@@ -430,6 +430,7 @@ def test_no_terms_is_refused():
     "config_cls,impl",
     [
         ("MinkUNetConfig", "wcfm.model.backbones:MinkUNetAttention"),
+        ("PolarMAEConfig", "wcfm.model.backbones:PolarMAEBackbone"),
         ("PixelMaskerConfig", "wcfm.model.augment:PixelMasker"),
         ("BlockMaskerConfig", "wcfm.model.augment:BlockMasker"),
         ("RegionMaskerConfig", "wcfm.model.augment:RegionMasker"),

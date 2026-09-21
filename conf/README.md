@@ -63,7 +63,7 @@ swap any of them without touching the preset.
 
 | Sub-group | Options |
 |---|---|
-| `model/backbone/` | `attn_mae` |
+| `model/backbone/` | `attn_mae`, `polarmae` |
 | `model/augment/` | `crop_mask`, `mask_only`, `mask_region`, `none` |
 | `model/masker/` | `block`, `pixel`, `region` |
 | `model/teacher/` | `ema`, `none` |

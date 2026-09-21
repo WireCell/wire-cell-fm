@@ -1,0 +1,8 @@
+# PoLAr-MAE: a ViT-S encoder over cnms groups of 32 pixels, its 4-block decoder and mask token.
+# `out` is the 384-d token feature carried to every pixel; the tap `local` is the 256-d
+# per-pixel mini-PointNet feature. It holds no mask tokens for injection, so `mae` and `hybrid`
+# refuse it; `dino`, `kd` and extraction take it.
+
+# Values not listed here are the schema defaults in wcfm/model/config.py.
+defaults:
+  - base_polarmae
