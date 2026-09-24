@@ -105,6 +105,7 @@ Same entry point, one process per rank.
 | `plot` | Figures over the metrics streams and the probe JSONs: `wcfm plot <run_dir>`, several run directories to overlay them |
 | `diff` | What two runs actually differ by — configs, and with `--code` the source trees they executed |
 | `test` | The suites a CPU cannot run: `--dist-cpu` runs the distributed suite locally on 2 CPU ranks, `--gpu` submits the GPU suites to Condor |
+| `datagen` | Queue a dataset builder on a CPU worker: `wcfm datagen <job> create_shards ...` or `pack_dataset ...`, arguments passed through |
 
 ```bash
 wcfm train model=hybrid run.name=demo optim.lr=3e-4   # train here
@@ -114,6 +115,7 @@ wcfm eval submit runs/demo                            # extract -> probes -> mer
 wcfm plot runs/demo                                   # diagnostics + probes -> runs/demo/plots
 wcfm plot runs/a runs/b --out-dir=cmp                 # the same panels, one colour per run
 wcfm diff runs/a runs/b --code
+wcfm datagen shards_2M create_shards --datadir A B --apa 0 --outdir S --shard_size 4000
 ```
 
 ## Configuring a run

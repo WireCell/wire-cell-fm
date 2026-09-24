@@ -14,6 +14,7 @@ COMMANDS = {
     "plot": "wcfm.cli.plot",
     "diff": "wcfm.cli.diff",
     "test": "wcfm.cli.test_gpu",
+    "datagen": "wcfm.cli.datagen",
 }
 
 
