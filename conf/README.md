@@ -39,35 +39,44 @@ merger plus a `_target_` to `__init__` caller.
 
 | Group | Default | Other options | What it is |
 |---|---|---|---|
-| `model/` | `mae` | `dino`, `hybrid`, `kd` | the training objective |
-| `data/` | `prod_jay_200k_mixed_sharded` | `prod_jay_200k_mixed_packed`, `prod_jay_100k` | which production, and how to read it |
+| `model/` | `mae` | `dino`, `hybrid`, `kd`, `polarmae` | the training objective |
+| `data/` | `prod_jay_200k_mixed_sharded` | `prod_jay_200k_mixed_packed`, `prod_jay_100k`, `fdhd_2M_mixed_sharded` | which production, and how to read it |
 | `optim/` | `adamw_cosine` | — | the optimizer and its schedules |
 | `run/` | `default` | — | name, seed, precision, resume, checkpoint cadence |
 | `metrics/` | `default` | `minimal`, `full` | which collectors run |
 | `launch/` | `single_gpu` | `multi_2gpu`, `multi_6gpu` | devices, strategy, DDP flags |
 | `experiment/` | — | `+experiment=<name>` | a whole run pinned as one file |
 
-The `data/` blocks are two productions across three readers:
+The `data/` blocks are three productions across three readers:
 
 | Block | Reader | Events | Where |
 |---|---|---|---|
-| `prod_jay_200k_mixed_sharded` | `sharded` — streams 200 HDF5 shards | 199,870 | `fm/cffm-data/shards_prod-jay-2026-06-11_mixed_apa0W` |
-| `prod_jay_200k_mixed_packed` | `packed` — one 27.8 GB `.npz` held in RAM | 199,870 | `fm/cffm-data/packed/prod-jay-2026-06-11_mixed_apa0W.npz` |
+| `prod_jay_200k_mixed_sharded` | `sharded` — streams 200 HDF5 shards | 199,870 | `fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W` |
+| `prod_jay_200k_mixed_packed` | `packed` — one 27.8 GB `.npz` held in RAM | 199,870 | `fm/cffm-data/packed/packed_fhdh_sparse_200k_mixed_apa0W.npz` |
 | `prod_jay_100k` | `direct` — reads the production tree | ~100k | `bnayak/cffm-data/prod-jay-100k-truth-2026-06-11` |
+| `fdhd_2M_mixed_sharded` | `sharded` — ~500 shards of 4000, event truth only | ~2.0M | `fm/cffm-data/shards_fdhd_sparse_2M_mixed_apa0W` |
 
 The two `200k_mixed` blocks are the *same events*, so a run can change reader without changing
 what it trains on. `packed` needs `request_memory` well above `wcfm submit`'s 32 GB default.
+`fdhd_2M_mixed_sharded` is the training set: numu and nue productions shuffled together, with
+no per-pixel truth, so evaluation stays on the 200k set, whose runs are disjoint from it. A shard
+set is built by `wcfm datagen <job> create_shards ...`, which queues
+`wcfm.data.prep.create_shards` on a CPU worker; `python -m wcfm.data.prep.create_shards --help`
+lists the arguments, and an archived production is first unpacked with
+`gridutils/datagen/unpack_apa.sh`.
 
 A `model/` preset is itself a recipe: it selects one option from each sub-group below. You can
-swap any of them without touching the preset.
+swap any of them without touching the preset. `polarmae` is the one preset on a different
+module, `pointmae`: it masks tokens of a point cloud rather than pixels, so it selects no
+augment and no teacher, and its two terms run only under it.
 
 | Sub-group | Options |
 |---|---|
-| `model/backbone/` | `attn_mae` |
+| `model/backbone/` | `attn_mae`, `polarmae` |
 | `model/augment/` | `crop_mask`, `mask_only`, `mask_region`, `none` |
 | `model/masker/` | `block`, `pixel`, `region` |
 | `model/teacher/` | `ema`, `none` |
-| `model/term/` | `dino`, `charge`, `occupancy`, `distill` |
+| `model/term/` | `dino`, `charge`, `occupancy`, `distill`; `chamfer`, `energy` under `polarmae` |
 | `model/cropper/` | `default` |
 | `model/normalize/` | `log` |
 

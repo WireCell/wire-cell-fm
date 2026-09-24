@@ -50,6 +50,35 @@ class MinkUNetConfig:
     inject_roles: list[str] = field(default_factory=lambda: ["masked"])
 
 
+@dataclass
+class PolarMAEConfig:
+    """`wcfm.model.backbones.PolarMAEBackbone`. `center`, `scale` and `group_radius_px`
+    describe the `(channel, tick)` canvas; `overlap_factor` sets group coverage; `norm`
+    selects the normalisation, `layer` per token or `global` over the batch as the published
+    PoLAr-MAE checkpoints do."""
+
+    _target_: str = "wcfm.model.backbones.PolarMAEBackbone"
+    center: list[float] = field(default_factory=lambda: [480.0, 563.0, 0.0])
+    scale: float = 1.0 / 600.0
+    group_radius_px: float = 5.0
+    num_init_groups: int = 256
+    context_length: int = 512
+    group_max_points: int = 32
+    group_upscale_points: int = 256
+    overlap_factor: float = 0.5
+    reduction_method: str = "fps"
+    embed_dim: int = 384
+    depth: int = 12
+    num_heads: int = 6
+    mlp_ratio: float = 4.0
+    qkv_bias: bool = True
+    attn_drop: float = 0.05
+    drop_path: float = 0.25
+    decoder_depth: int = 4
+    norm: str = "layer"
+    upsample_k: int = 5
+
+
 # --------------------------------------------------------------------------------- augment
 
 
@@ -196,6 +225,21 @@ class DistillTermConfig:
 
 
 @dataclass
+class ChamferTermConfig:
+    """`channels` is 4 to rebuild `(x, y, z, log_q)` per point, 3 for positions alone."""
+
+    _target_: str = "wcfm.model.terms.ChamferTerm"
+    weight: float = 1.0
+    channels: int = 4
+
+
+@dataclass
+class EnergyTermConfig:
+    _target_: str = "wcfm.model.terms.EnergyTerm"
+    weight: float = 1.0
+
+
+@dataclass
 class OccupancyTermConfig:
     """`alpha` and `gamma` are the focal-loss knobs. They are exposed rather than fixed at
     0.25/2.0 because the positive rate depends on how the candidate set was built, and this
@@ -229,9 +273,27 @@ class SslModuleConfig:
     observe_taps: list[str] = field(default_factory=list)
 
 
+@dataclass
+class PointMaeModuleConfig:
+    """The composition root of the Point-MAE model axis: a `PolarMAEBackbone`, `GroupTerm`s
+    keyed by name, and the token mask ratio. `max_points` and `charge_threshold` thin each
+    event before tokenisation and are off by default."""
+
+    _target_: str = "wcfm.model.modules.PointMaeModule"
+    _convert_: str = "all"
+    backbone: Any = MISSING
+    terms: dict[str, Any] = field(default_factory=dict)
+    normalize: Any = None
+    mask_ratio: float = 0.6
+    max_points: int | None = None
+    charge_threshold: float | None = None
+
+
 GROUPS: tuple[tuple[str, str, type], ...] = (
     ("model/module", "ssl", SslModuleConfig),
+    ("model/module", "pointmae", PointMaeModuleConfig),
     ("model/backbone", "base_minkunet", MinkUNetConfig),
+    ("model/backbone", "base_polarmae", PolarMAEConfig),
     ("model/masker", "base_pixel", PixelMaskerConfig),
     ("model/masker", "base_block", BlockMaskerConfig),
     ("model/masker", "base_region", RegionMaskerConfig),
@@ -244,6 +306,8 @@ GROUPS: tuple[tuple[str, str, type], ...] = (
     ("model/term", "base_charge", ChargeTermConfig),
     ("model/term", "base_distill", DistillTermConfig),
     ("model/term", "base_occupancy", OccupancyTermConfig),
+    ("model/term", "base_chamfer", ChamferTermConfig),
+    ("model/term", "base_energy", EnergyTermConfig),
 )
 
 

@@ -328,7 +328,7 @@ def test_a_real_short_run_writes_a_run_directory_and_a_metrics_stream(conf_dir, 
 # from the config -- had never executed. This closes it against the real production: /gpfs01 is
 # mounted on the login node and the sparse readers are pure IO, so it needs no GPU.
 
-SHARD_DIR = Path("/gpfs01/lbne/users/fm/cffm-data/shards_prod-jay-2026-06-11_mixed_apa0W")
+SHARD_DIR = Path("/gpfs01/lbne/users/fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W")
 
 
 @pytest.mark.needs_data

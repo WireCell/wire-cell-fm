@@ -37,13 +37,18 @@ def test_the_model_schema_plugin_is_discoverable():
 
 
 def test_the_shipped_presets():
-    assert PRESETS == ["dino", "hybrid", "kd", "mae"], (
+    assert PRESETS == ["dino", "hybrid", "kd", "mae", "polarmae"], (
         "`mae` (charge + occupancy, no teacher) arrived with the occupancy term in Stage 4. "
         "`dino_recon` (dino + charge) was dropped on 2026-09-10: it matched no archived run "
         "and nothing had trained it. Adding a charge term to any preset is still one "
         "override -- see test_a_charge_term_can_be_added_to_a_teacher_preset_and_removed_again. "
-        "`kd` (distill alone, no augment, no teacher) arrived with the distill term."
+        "`kd` (distill alone, no augment, no teacher) arrived with the distill term. "
+        "`polarmae` (chamfer + energy on the pointmae module) arrived with the PoLAr-MAE port."
     )
+
+
+# The one preset on the second module; every other preset is SslModule over MinkUNetAttention.
+POINTMAE_PRESETS = {"polarmae"}
 
 
 def test_the_default_objective_is_recorded_not_merely_inherited(hydra_all):
@@ -63,10 +68,14 @@ def test_the_default_objective_is_recorded_not_merely_inherited(hydra_all):
 
 
 @pytest.mark.parametrize("preset", PRESETS)
-def test_every_preset_composes_with_the_ssl_module_target(hydra_all, preset):
+def test_every_preset_composes_with_its_module_target(hydra_all, preset):
     cfg = compose(config_name="config", overrides=[f"model={preset}", "run.name=t"])
-    assert cfg.model._target_ == "wcfm.model.modules.SslModule"
-    assert cfg.model.backbone._target_ == "wcfm.model.backbones.MinkUNetAttention"
+    if preset in POINTMAE_PRESETS:
+        assert cfg.model._target_ == "wcfm.model.modules.PointMaeModule"
+        assert cfg.model.backbone._target_ == "wcfm.model.backbones.PolarMAEBackbone"
+    else:
+        assert cfg.model._target_ == "wcfm.model.modules.SslModule"
+        assert cfg.model.backbone._target_ == "wcfm.model.backbones.MinkUNetAttention"
     assert cfg.model.terms, "a preset with no term trains nothing"
 
 
@@ -76,6 +85,9 @@ def test_a_teacher_is_present_exactly_when_a_term_distils(hydra_all, preset):
     that is not there, and a teacher no term reads, which would let `--source=teacher`
     extraction return features from initialisation weights. The presets must agree with it."""
     cfg = compose(config_name="config", overrides=[f"model={preset}", "run.name=t"])
+    if preset in POINTMAE_PRESETS:
+        assert "teacher" not in cfg.model and "augment" not in cfg.model
+        return
     distils = "dino" in cfg.model.terms
     expected = "EmaTeacher" if distils else "NoTeacher"
     assert cfg.model.teacher._target_ == f"wcfm.model.modules.{expected}"
@@ -104,6 +116,22 @@ def test_kd_is_the_distill_term_alone_on_the_whole_image(hydra_all):
     assert cfg.model.augment.masker is None
     assert cfg.model.teacher._target_ == "wcfm.model.modules.NoTeacher"
     assert OmegaConf.is_missing(cfg.model.terms.distill, "checkpoint")
+
+
+def test_polarmae_is_chamfer_plus_energy_on_whole_events(hydra_all):
+    """Token masking happens inside the module, so the preset selects no augment and no
+    teacher, and the module's own knobs default off."""
+    cfg = compose(config_name="config", overrides=["model=polarmae", "run.name=t"])
+    assert list(cfg.model.terms) == ["chamfer", "energy"]
+    assert cfg.model.mask_ratio == 0.6
+    assert cfg.model.max_points is None and cfg.model.charge_threshold is None
+    assert cfg.model.normalize.min_val == cfg.data.feat_min_val
+    assert cfg.model.backbone.overlap_factor == 0.5
+    cfg = compose(
+        config_name="config",
+        overrides=["model=polarmae", "~model.terms.energy", "model.max_points=8000", "run.name=t"],
+    )
+    assert list(cfg.model.terms) == ["chamfer"] and cfg.model.max_points == 8000
 
 
 def test_dino_and_hybrid_differ_only_in_score_injected(hydra_all):
@@ -193,6 +221,27 @@ def test_the_old_backbone_registry_is_reachable_as_flags(hydra_all):
         assert OmegaConf.to_container(cfg.model.backbone)[key] == value, override
 
 
+def test_the_polarmae_backbone_is_an_option_on_the_backbone_group(hydra_all):
+    """`model/backbone=polarmae` swaps the backbone under any preset; the defaults come from
+    `PolarMAEConfig`, so the yaml lists none."""
+    cfg = compose(
+        config_name="config", overrides=["model=dino", "model/backbone=polarmae", "run.name=t"]
+    )
+    bb = OmegaConf.to_container(cfg.model.backbone)
+    assert bb["_target_"] == "wcfm.model.backbones.PolarMAEBackbone"
+    assert bb["overlap_factor"] == 0.5 and bb["norm"] == "layer"
+    with pytest.raises((ValidationError, ConfigCompositionException), match="context_length"):
+        compose(
+            config_name="config",
+            overrides=[
+                "model=dino",
+                "model/backbone=polarmae",
+                "model.backbone.context_length=long",
+                "run.name=t",
+            ],
+        )
+
+
 def test_augment_options(hydra_all):
     cfg = compose(
         config_name="config", overrides=["model=dino", "model/augment=mask_only", "run.name=t"]
@@ -247,4 +296,14 @@ def test_every_experiment_composes(hydra_all, experiment):
     """
     cfg = compose(config_name="config", overrides=[f"+experiment={experiment}"])
     assert cfg.model is not None and cfg.data is not None
-    assert str(cfg.model._target_).endswith("SslModule")
+    assert str(cfg.model._target_).endswith(("SslModule", "PointMaeModule"))
+
+
+def test_polarmae_turns_find_unused_parameters_off(hydra_all):
+    """`PointMaeModule.forward` runs every head every step, so its preset drops the per-step
+    graph traversal the pixel presets rely on. The pixel presets keep it."""
+    off = compose(config_name="config", overrides=["model=polarmae", "run.name=t"])
+    assert off.launch.find_unused_parameters is False
+    for preset in ("mae", "dino", "hybrid"):
+        on = compose(config_name="config", overrides=[f"model={preset}", "run.name=t"])
+        assert on.launch.find_unused_parameters is True, preset

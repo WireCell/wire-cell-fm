@@ -1,0 +1,4 @@
+# Predict the charge of every point of a masked group from its positions and decoded token.
+# Runs under model/module=pointmae only.
+defaults:
+  - base_energy

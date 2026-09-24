@@ -1,0 +1,39 @@
+# @package _global_
+#
+# `polarmae_pm4w` on the 2M mixed production, at the reference's footing: two ranks at
+# per-rank batch 16, AdamW 9.9e-5 with a 1000-step warmup, two passes over 2,008,860 events.
+# The sharded reader levels its 10 readers (2 ranks x 5 workers) to 51 full shards each, so an
+# epoch is 63,750 optimizer steps and the run 127,500; the reference ran 80,000 over a 1.8M pool.
+#
+# The learning rate is hedged with a second arm, decided by step 5000 on the token RankMe of
+# the spectrum collector (every 100 steps): a rank falling under ~8 while the token norms
+# rise is the onset seen at 1.7e-4 on batch 96.
+#
+#   env WCFM_REQUEST_MEMORY=48000 WCFM_REQUEST_CPUS=10 wcfm submit +experiment=polarmae_2M
+#   env WCFM_REQUEST_MEMORY=48000 WCFM_REQUEST_CPUS=10 wcfm submit +experiment=polarmae_2M \
+#     optim.lr=7.0e-5 run.name=wcfm_polarmae_2M_lr7e5
+#
+# Checkpoints are written at epoch ends, so each arm leaves two. Everything not set below
+# comes from polarmae_pm4w and then the schema.
+
+defaults:
+  - polarmae_pm4w
+  - override /data: fdhd_2M_mixed_sharded
+  - _self_
+
+run:
+  name: wcfm_polarmae_2M
+
+data:
+  global_batch_size: 32   # per-rank 16 on two ranks
+
+optim:
+  epochs: 2
+  schedules:
+    lr:
+      warmup_epochs: 0.0157   # 1000 steps of 63,750 per epoch
+
+metrics:
+  collectors:
+    spectrum:
+      cadence: 100

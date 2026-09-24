@@ -23,7 +23,7 @@ from wcfm.data.build import per_rank_batch_size  # noqa: E402
 from wcfm.data.collate import collate, collate_meta  # noqa: E402
 from wcfm.data.voxels import Batch, offsets_from_counts, voxels_from  # noqa: E402
 
-SHARD_DIR = Path("/gpfs01/lbne/users/fm/cffm-data/shards_prod-jay-2026-06-11_mixed_apa0W")
+SHARD_DIR = Path("/gpfs01/lbne/users/fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W")
 
 
 def _voxels(n: int, c: int = 1):

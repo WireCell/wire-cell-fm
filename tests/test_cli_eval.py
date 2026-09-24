@@ -179,6 +179,22 @@ def test_sources_and_taps_reach_the_plan(run_dir, capsys):
     assert "['student']" in out and "['dec_half']" in out
 
 
+def test_a_data_option_replaces_the_runs_production_but_not_its_batch(run_dir, capsys):
+    """A run trained on a set without per-pixel truth is scored on one that has it; the
+    per-rank batch, the seed and the charge transform still come from the run."""
+    assert main(["extract", str(run_dir), "--dry-run", "--data=prod_jay_200k_mixed_sharded"]) == 0
+    out = capsys.readouterr().out
+    assert "shards_fhdh_sparse_200k_mixed_apa0W" in out
+    assert "/nowhere" not in out
+    assert "batch_size=8" in out
+
+
+def test_an_unknown_data_option_names_the_ones_that_exist(run_dir, capsys):
+    assert main(["extract", str(run_dir), "--dry-run", "--data=no_such_set"]) == 2
+    err = capsys.readouterr().err
+    assert "no data option 'no_such_set'" in err and "prod_jay_200k_mixed_sharded" in err
+
+
 # ---------------------------------------------------------------------------- refusals
 
 

@@ -1,10 +1,10 @@
 """The "direct" backend: read the production HDF5 as it comes off the simulation.
-This is the legacy option, and is not recommended for training. 
 
-Events sit on different files in a certain directory.
-The dataset scans it and builds an index of all the sparse samples, then reads them on demand.
-Because many files need to accessed to build a batch, it is slow and memory-inefficient
-
+Events sit in many files under one directory. `DirectDataset` scans it, indexes every sparse
+sample and reads them on demand, one file open per sample, which is slow on GPFS: it is the
+legacy option and not recommended for training. The functions above it parse one event out
+of an open file and are shared with `wcfm.data.prep.create_shards`, which reads whole files
+instead, so a shard set is the production exactly as this reader sees it.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,40 +31,204 @@ DEFAULT_VIEW_RANGES: dict[str, tuple[int, int]] = {
     "W": (1600, 2650),
 }
 
+FRAME_NAME = "frame_rebinned_reco"
+
+# Extra per-pixel truth frames: meta key -> (HDF5 frame name, output dtype). Track ids can be
+# positive or negative (negative = G4-dropped secondary of parent abs(id)); both are kept as-is.
+EXTRA_TRUTH_FRAMES = {
+    "pixel_energyfrac": ("frame_energyfrac_1st", np.float32),
+    "pixel_trackid": ("frame_trackid_1st", np.int32),
+    "pixel_truth_q": ("frame_total_numelectrons", np.float32),
+}
+
+
+def view_range(view: str, view_ranges: dict[str, tuple[int, int]] | None = None) -> tuple[int, int]:
+    """The `[start, end)` channel range of a wire-plane view. Raises on an unknown view."""
+    ranges = view_ranges if view_ranges is not None else DEFAULT_VIEW_RANGES
+    view = view.upper()
+    if view not in ranges:
+        raise ValueError(f"view must be one of {list(ranges)}, got {view!r}")
+    return ranges[view]
+
+
+def metadata_path(pixeldata_path: Path, apa: int) -> Path:
+    """The `_metadata.h5` beside a `_pixeldata-anode<apa>.h5` (or older `_anode<apa>.h5`)."""
+    suffix = f"_pixeldata-anode{apa}.h5"
+    if pixeldata_path.name.endswith(suffix):
+        basename = pixeldata_path.name[: -len(suffix)]
+    else:
+        basename = pixeldata_path.stem
+    return pixeldata_path.parent / f"{basename}_metadata.h5"
+
+
+def is_sparse_frame(group: h5py.Group) -> bool:
+    """Whether an event group carries the sparse reco frame the readers consume."""
+    if FRAME_NAME not in group:
+        return False
+    frame = group[FRAME_NAME]
+    return isinstance(frame, h5py.Group) and "coords" in frame and "features" in frame
+
+
+def select_view(
+    coords: np.ndarray, feats: np.ndarray, ch_start: int, ch_end: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep the pixels in `[ch_start, ch_end)`, rebase the channel to 0 and give the features a
+    column: `(N, 2) int32` and `(N, 1) float32`, the layout `voxels_from` and the shards use."""
+    keep = (coords[:, 0] >= ch_start) & (coords[:, 0] < ch_end)
+    out = coords[keep].astype(np.int32, copy=True)
+    out[:, 0] -= ch_start
+    return out, feats[keep].astype(np.float32).reshape(-1, 1)
+
+
+def classify(nu_pdg: int, nu_ccnc: int) -> int:
+    """Event class: 0 numuCC, 1 nueCC, 2 NC of any flavour, -1 anything else (nu_tau CC)."""
+    if nu_ccnc == 1:
+        return 2
+    if abs(nu_pdg) == 14 and nu_ccnc == 0:
+        return 0
+    if abs(nu_pdg) == 12 and nu_ccnc == 0:
+        return 1
+    return -1
+
+
+def unknown_truth(event_key: str) -> dict:
+    """The event-truth dict for an event whose metadata is missing or unreadable."""
+    return {
+        "label": -1,
+        "nu_pdg": 0,
+        "nu_ccnc": -1,
+        "nu_intType": -1,
+        "nu_energy": 0.0,
+        "vertex_xyz": np.zeros(3, dtype=np.float32),
+        "event_key": event_key,
+    }
+
+
+def event_truth(
+    metadata: h5py.File | None, group: str, event_key: str, warn: Callable[[str], None]
+) -> dict:
+    """Event-level truth from an open `_metadata.h5`, `unknown_truth` when it is None or the
+    row cannot be read. `warn` receives the reason once per file."""
+    if metadata is None:
+        warn(f"metadata file not found for {event_key}")
+        return unknown_truth(event_key)
+    try:
+        row = metadata[group]["metadata"][0]
+        nu_pdg = int(row["nu_pdg"])
+        nu_ccnc = int(row["nu_ccnc"])
+        return {
+            "label": classify(nu_pdg, nu_ccnc),
+            "nu_pdg": nu_pdg,
+            "nu_ccnc": nu_ccnc,
+            "nu_intType": int(row["nu_intType"]),
+            "nu_energy": float(row["nu_energy"]),
+            "vertex_xyz": np.array(
+                [row["nu_vertex_x"], row["nu_vertex_y"], row["nu_vertex_z"]], dtype=np.float32
+            ),
+            "event_key": event_key,
+        }
+    except Exception as e:  # noqa: BLE001 - any unreadable row is "unknown"
+        warn(f"could not read metadata for {event_key}: {e}")
+        return unknown_truth(event_key)
+
+
+def empty_pixel_truth(n: int, extra: bool) -> dict:
+    """All-fill pixel truth of length n (label 0 = Background/no-truth)."""
+    out = {"pixel_labels": np.zeros(n, dtype=np.int8)}
+    if extra:
+        for key, (_, dtype) in EXTRA_TRUTH_FRAMES.items():
+            out[key] = np.zeros(n, dtype=dtype)
+    return out
+
+
+def pixel_truth(
+    group: h5py.Group,
+    reco_coords: np.ndarray,
+    ch_start: int,
+    ch_end: int,
+    extra: bool,
+    warn: Callable[[str], None],
+) -> dict:
+    """Per-pixel truth aligned to the view-filtered reco pixel order of `reco_coords` (the
+    unfiltered `(N, 2)` frame coords). `pixel_labels` from `frame_label_1st` and, with
+    `extra`, the `EXTRA_TRUTH_FRAMES`; reco pixels with no truth hit carry the fill value."""
+    mask_reco = (reco_coords[:, 0] >= ch_start) & (reco_coords[:, 0] < ch_end)
+    reco_view = reco_coords[mask_reco]
+    n_view = int(mask_reco.sum())
+
+    if "frame_label_1st" not in group:
+        warn(
+            f"frame_label_1st not found in {group.file.filename}[{group.name}]; pixel truth "
+            "defaults to 0 (Background). Pre-2026-06-11 productions (frame_pid_*) are not "
+            "supported."
+        )
+        return empty_pixel_truth(n_view, extra)
+
+    label_coords = group["frame_label_1st"]["coords"][()]
+    label_feats = group["frame_label_1st"]["features"][()]
+    mask_lbl = (label_coords[:, 0] >= ch_start) & (label_coords[:, 0] < ch_end)
+    lbl_view_coords = label_coords[mask_lbl]
+    lbl_view_feats = label_feats[mask_lbl]
+
+    # Map each reco pixel to its row in the view-filtered truth frame.
+    row_lookup = {(int(c[0]), int(c[1])): i for i, c in enumerate(lbl_view_coords)}
+    rows = np.array([row_lookup.get((int(c[0]), int(c[1])), -1) for c in reco_view], dtype=np.int64)
+    has = rows >= 0
+
+    out = empty_pixel_truth(n_view, extra)
+    out["pixel_labels"][has] = lbl_view_feats[rows[has]].astype(np.int8)
+    if not extra:
+        return out
+
+    for key, (frame, dtype) in EXTRA_TRUTH_FRAMES.items():
+        if frame not in group:
+            warn(f"{frame} not found in {group.file.filename}; {key} defaults to 0.")
+            continue
+        coords_f = group[frame]["coords"][()]
+        feats_f = group[frame]["features"][()]
+        m = (coords_f[:, 0] >= ch_start) & (coords_f[:, 0] < ch_end)
+        f_view_coords, f_view_feats = coords_f[m], feats_f[m]
+        # All truth frames share coords by construction (the classify script reuses the
+        # frame_trackid coords), so the label lookup is reused when that holds.
+        if f_view_coords.shape == lbl_view_coords.shape and np.array_equal(
+            f_view_coords, lbl_view_coords
+        ):
+            f_rows, f_has = rows, has
+        else:
+            warn(
+                f"{frame} coords differ from frame_label_1st in {group.file.filename}; "
+                "using a per-frame lookup."
+            )
+            lk = {(int(c[0]), int(c[1])): i for i, c in enumerate(f_view_coords)}
+            f_rows = np.array(
+                [lk.get((int(c[0]), int(c[1])), -1) for c in reco_view], dtype=np.int64
+            )
+            f_has = f_rows >= 0
+        vals = f_view_feats[f_rows[f_has]]
+        if np.issubdtype(dtype, np.integer) and vals.dtype.kind == "f":
+            vals = np.rint(vals)
+        out[key][f_has] = vals.astype(dtype)
+    return out
+
 
 @dataclass(frozen=True)
 class SampleIndex:
     """One sample: a file path, and a group inside it"""
+
     path: Path
     group: str
-
-
-def _classify(nu_pdg: int, nu_ccnc: int) -> int:
-    if nu_ccnc == 1:
-        return 2          # NC — any flavour
-    if abs(nu_pdg) == 14 and nu_ccnc == 0:
-        return 0          # numuCC (nu or anti-nu)
-    if abs(nu_pdg) == 12 and nu_ccnc == 0:
-        return 1          # nueCC (nu or anti-nu)
-    return -1             # skip (e.g. nu_tau CC)
 
 
 class DirectDataset(Dataset):
     """Map-style reader over the production HDF5 tree.
 
-    Scans recursively for `*anode{APA}.h5`, treats each `/<group>/<frame_name>` as one sparse
-    sample, keeps a single wire-plane view, and caches the file index to disk keyed by a hash of
-    the resolved root so two datasets never share a cache file.
+    Scans recursively for `*anode{APA}.h5`, treats each `/<group>/frame_rebinned_reco` as one
+    sparse sample, keeps a single wire-plane view, and caches the file index to disk keyed by a
+    hash of the resolved root so two datasets never share a cache file.
 
-    `__getitem__` returns `(voxels, meta)`. Event-level truth is always present.
-    Per-pixel truth are opt-in, because HDF5 decompresses them on every read.
+    `__getitem__` returns `Batch(voxels, meta)`. Event-level truth is always present. Per-pixel
+    truth is opt-in, because HDF5 decompresses it on every read.
     """
-
-    _EXTRA_TRUTH_FRAMES = {
-        "pixel_energyfrac": ("frame_energyfrac_1st", np.float32),
-        "pixel_trackid": ("frame_trackid_1st", np.int32),
-        "pixel_truth_q": ("frame_total_numelectrons", np.float32),
-    }
 
     def __init__(
         self,
@@ -73,21 +238,15 @@ class DirectDataset(Dataset):
         use_cache: bool = True,
         cache_dir: str | Path = "./data",
         view_ranges: dict[str, tuple[int, int]] | None = None,
-        frame_name: str = "frame_rebinned_reco",
+        frame_name: str = FRAME_NAME,
         return_pixel_truth: bool = False,
         return_extra_truth: bool = False,
     ):
         self.datadir = Path(datadir)
         self.apa = int(apa)
         self.frame_name = frame_name
-
-        self.view_ranges: dict[str, tuple[int, int]] = (
-            view_ranges if view_ranges is not None else DEFAULT_VIEW_RANGES
-        )
         self.view = view.upper()
-        if self.view not in self.view_ranges:
-            raise ValueError(f"view must be one of {list(self.view_ranges)}, got {view!r}")
-        self.ch_start, self.ch_end = self.view_ranges[self.view]
+        self.ch_start, self.ch_end = view_range(view, view_ranges)
 
         self.use_cache = use_cache
         self.cache_dir = Path(cache_dir)
@@ -100,9 +259,9 @@ class DirectDataset(Dataset):
             self.cache_dir / f"DirectDataset_APA{self.apa}_view{self.view}_{root_hash}_cache.pt"
         )
 
-        self.return_pixel_truth = return_pixel_truth
+        self.return_pixel_truth = return_pixel_truth or return_extra_truth
         self.return_extra_truth = return_extra_truth
-        self._warned_missing: set = set()
+        self._warned: set[str] = set()
 
         self.samples: list[SampleIndex] = self._scan()
         if not self.samples:
@@ -134,15 +293,7 @@ class DirectDataset(Dataset):
                 with h5py.File(fp, "r") as f:
                     for group in f.keys():
                         grp = f[group]
-                        if not isinstance(grp, h5py.Group) or self.frame_name not in grp:
-                            continue
-                        frame = grp[self.frame_name]
-                        # Sparse format only: a subgroup carrying coords and features.
-                        if (
-                            isinstance(frame, h5py.Group)
-                            and "coords" in frame
-                            and "features" in frame
-                        ):
+                        if isinstance(grp, h5py.Group) and is_sparse_frame(grp):
                             samples.append(SampleIndex(path=fp, group=group))
             except OSError as e:
                 warnings.warn(f"could not open {fp}: {e}", stacklevel=2)
@@ -157,212 +308,41 @@ class DirectDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
+    def _warn_once(self, msg: str) -> None:
+        if msg not in self._warned:
+            warnings.warn(msg, stacklevel=2)
+            self._warned.add(msg)
+
     def __getitem__(self, idx: int) -> Batch:
         s = self.samples[idx]
+        event_key = f"{s.path.name}:{s.group}"
 
         with h5py.File(s.path, "r") as f:
-            frame = f[s.group][self.frame_name]
-            coords = torch.from_numpy(frame["coords"][()]).to(torch.int32)  # (N, 2)
-            feats = torch.from_numpy(frame["features"][()]).to(torch.float32)  # (N,)
+            grp = f[s.group]
+            raw_coords = grp[self.frame_name]["coords"][()]
+            raw_feats = grp[self.frame_name]["features"][()]
+            coords, feats = select_view(raw_coords, raw_feats, self.ch_start, self.ch_end)
+            pixel = (
+                pixel_truth(
+                    grp,
+                    raw_coords,
+                    self.ch_start,
+                    self.ch_end,
+                    self.return_extra_truth,
+                    self._warn_once,
+                )
+                if self.return_pixel_truth
+                else {}
+            )
 
-        # Keep only pixels in this view's channel range, then rebase the channel to 0.
-        keep = (coords[:, 0] >= self.ch_start) & (coords[:, 0] < self.ch_end)
-        coords = coords[keep].clone()
-        feats = feats[keep].unsqueeze(1)  # Voxels wants (N, C)
-        coords[:, 0] -= self.ch_start
+        mpath = metadata_path(s.path, self.apa)
+        if mpath.exists():
+            with h5py.File(mpath, "r") as m:
+                meta = event_truth(m, s.group, event_key, self._warn_once)
+        else:
+            meta = event_truth(None, s.group, event_key, self._warn_once)
+        meta["vertex_xyz"] = torch.from_numpy(meta["vertex_xyz"])
+        meta.update(pixel)
 
         offsets = torch.tensor([0, coords.shape[0]], dtype=torch.int64)
-
-        meta = self._read_event_truth(s.path, s.group)
-        if self.return_pixel_truth:
-            meta.update(self._read_pixel_truth_arrays(s.path, s.group))
-        return Batch(voxels_from(coords, feats, offsets), meta)
-
-    # -- truth -------------------------------------------------------------------
-
-    def _metadata_path(self, pixeldata_path: Path) -> Path:
-        suffix = f"_pixeldata-anode{self.apa}.h5"
-        if not pixeldata_path.name.endswith(suffix):
-            # Older naming: "..._anode3.h5" without "_pixeldata" prefix.
-            basename = pixeldata_path.stem   # drop .h5
-        else:
-            basename = pixeldata_path.name[: -len(suffix)]
-        return pixeldata_path.parent / f"{basename}_metadata.h5"
-
-    def _warn_once(self, metadata_path: Path, msg: str) -> None:
-        key = str(metadata_path)
-        if key not in self._warned_missing:
-            warnings.warn(msg, stacklevel=2)
-            self._warned_missing.add(key)
-
-    # ------------------------------------------------------------------
-    # Event-truth reader
-    # ------------------------------------------------------------------
-
-    def _unknown_metadata(self, event_key: str) -> dict:
-        """Sentinel metadata dict used when the metadata file is missing/unreadable."""
-        return {
-            "label":      -1,
-            "nu_pdg":     0,
-            "nu_ccnc":    -1,
-            "nu_intType": -1,
-            "nu_energy":  0.0,
-            "vertex_xyz": torch.zeros(3, dtype=torch.float32),
-            "event_key":  event_key,
-        }
-
-    def _read_event_truth(self, pixeldata_path: Path, group: str) -> dict:
-        event_key = f"{pixeldata_path.name}:{group}"
-        metadata_path = self._metadata_path(pixeldata_path)
-
-        if not metadata_path.exists():
-            self._warn_once(metadata_path, f"Metadata file not found: {metadata_path}")
-            return self._unknown_metadata(event_key)
-
-        try:
-            with h5py.File(metadata_path, "r") as f:
-                row = f[group]["metadata"][0]
-                nu_pdg     = int(row["nu_pdg"])
-                nu_ccnc    = int(row["nu_ccnc"])
-                nu_intType = int(row["nu_intType"])
-                nu_energy  = float(row["nu_energy"])
-                vx = float(row["nu_vertex_x"])
-                vy = float(row["nu_vertex_y"])
-                vz = float(row["nu_vertex_z"])
-        except Exception as e:
-            self._warn_once(
-                metadata_path, f"Could not read metadata from {metadata_path}[{group}]: {e}"
-            )
-            return self._unknown_metadata(event_key)
-
-        return {
-            "label":      _classify(nu_pdg, nu_ccnc),
-            "nu_pdg":     nu_pdg,
-            "nu_ccnc":    nu_ccnc,
-            "nu_intType": nu_intType,
-            "nu_energy":  nu_energy,
-            "vertex_xyz": torch.tensor([vx, vy, vz], dtype=torch.float32),
-            "event_key":  event_key,
-        }
-
-    # ------------------------------------------------------------------
-    # Pixel-level truth reader
-    # ------------------------------------------------------------------
-
-    # Extra per-pixel truth frames: meta key -> (HDF5 frame name, output dtype).
-    # Track ids can be positive or negative (negative = G4-dropped secondary
-    # of parent abs(id)); both are kept as-is.
-    _EXTRA_TRUTH_FRAMES = {
-        "pixel_energyfrac": ("frame_energyfrac_1st",     np.float32),
-        "pixel_trackid":    ("frame_trackid_1st",        np.int32),
-        "pixel_truth_q":    ("frame_total_numelectrons", np.float32),
-    }
-
-    def _empty_pixel_truth(self, n: int) -> dict:
-        """All-fill pixel-truth dict of length n (label 0 = Background/no-truth)."""
-        out = {"pixel_labels": np.zeros(n, dtype=np.int8)}
-        if self.return_extra_truth:
-            for key, (_, dtype) in self._EXTRA_TRUTH_FRAMES.items():
-                out[key] = np.zeros(n, dtype=dtype)
-        return out
-
-    def _read_pixel_truth_arrays(self, pixeldata_path: Path, group: str) -> dict:
-        """
-        Read per-pixel truth frames (frame_label_1st and, with
-        return_extra_truth, energyfrac/trackid/total_numelectrons) and
-        return arrays aligned to the reco pixel order.
-
-        Reco pixels with no truth hit carry the fill value (0 / 0.0).
-        """
-        try:
-            with h5py.File(pixeldata_path, "r") as f:
-                g = f[group]
-                reco_coords = g[self.frame_name]["coords"][()]   # (N, 2) int32
-
-                mask_reco = ((reco_coords[:, 0] >= self.ch_start) &
-                             (reco_coords[:, 0] < self.ch_end))
-                n_view = int(mask_reco.sum())
-
-                if "frame_label_1st" not in g:
-                    self._warn_once(
-                        pixeldata_path,
-                        f"frame_label_1st not found in {pixeldata_path}[{group}]; "
-                        f"pixel truth defaults to 0 (Background). Pre-2026-06-11 "
-                        f"productions (frame_pid_*) are no longer supported.",
-                    )
-                    return self._empty_pixel_truth(n_view)
-
-                label_coords = g["frame_label_1st"]["coords"][()]    # (M, 2) int32
-                label_feats  = g["frame_label_1st"]["features"][()]  # (M,)   int8
-
-                extra_raw = {}
-                if self.return_extra_truth:
-                    for key, (frame, _) in self._EXTRA_TRUTH_FRAMES.items():
-                        if frame in g:
-                            extra_raw[key] = (g[frame]["coords"][()],
-                                              g[frame]["features"][()])
-                        else:
-                            self._warn_once(
-                                pixeldata_path,
-                                f"{frame} not found in {pixeldata_path}; "
-                                f"{key} defaults to 0.",
-                            )
-        except Exception as e:
-            self._warn_once(
-                pixeldata_path,
-                f"Could not read pixel truth from {pixeldata_path}[{group}]: {e}",
-            )
-            return self._empty_pixel_truth(0)
-
-        # Filter to this view's channel range (same logic as APASparseDataset)
-        reco_view = reco_coords[mask_reco]
-        mask_lbl  = ((label_coords[:, 0] >= self.ch_start) &
-                     (label_coords[:, 0] < self.ch_end))
-        lbl_view_coords = label_coords[mask_lbl]
-        lbl_view_feats  = label_feats[mask_lbl]
-
-        # Map each reco pixel to its row in the (view-filtered) truth frame.
-        row_lookup = {
-            (int(c[0]), int(c[1])): i for i, c in enumerate(lbl_view_coords)
-        }
-        rows = np.array(
-            [row_lookup.get((int(c[0]), int(c[1])), -1) for c in reco_view],
-            dtype=np.int64,
-        )
-        has = rows >= 0
-
-        out = self._empty_pixel_truth(len(reco_view))
-        out["pixel_labels"][has] = lbl_view_feats[rows[has]].astype(np.int8)
-
-        for key, (coords_f, feats_f) in extra_raw.items():
-            dtype = self._EXTRA_TRUTH_FRAMES[key][1]
-            m = ((coords_f[:, 0] >= self.ch_start) &
-                 (coords_f[:, 0] < self.ch_end))
-            f_view_coords = coords_f[m]
-            f_view_feats  = feats_f[m]
-
-            # All truth frames share coords by construction (classify script
-            # reuses frame_trackid coords) — reuse the label lookup when true.
-            if (f_view_coords.shape == lbl_view_coords.shape
-                    and np.array_equal(f_view_coords, lbl_view_coords)):
-                f_rows, f_has = rows, has
-            else:
-                self._warn_once(
-                    pixeldata_path,
-                    f"{self._EXTRA_TRUTH_FRAMES[key][0]} coords differ from "
-                    f"frame_label_1st in {pixeldata_path}; using per-frame lookup.",
-                )
-                lk = {(int(c[0]), int(c[1])): i
-                      for i, c in enumerate(f_view_coords)}
-                f_rows = np.array(
-                    [lk.get((int(c[0]), int(c[1])), -1) for c in reco_view],
-                    dtype=np.int64,
-                )
-                f_has = f_rows >= 0
-
-            vals = f_view_feats[f_rows[f_has]]
-            if np.issubdtype(dtype, np.integer) and vals.dtype.kind == "f":
-                vals = np.rint(vals)
-            out[key][f_has] = vals.astype(dtype)
-
-        return out
+        return Batch(voxels_from(torch.from_numpy(coords), torch.from_numpy(feats), offsets), meta)

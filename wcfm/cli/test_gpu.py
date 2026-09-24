@@ -35,6 +35,7 @@ from wcfm.cli.jobpack import (
     check_repo,
     git_environment,
     pack_repo,
+    pop_opt,
     request_disk,
     stage_executable,
 )
@@ -98,9 +99,9 @@ def _dist_cpu(args: list[str]) -> int:
     this is the same signal, not a weaker one. What it cannot cover is anything that needs a
     device: the `gpu` suite stays on Condor.
     """
-    repo = Path(_opt_from(args, "--repo", str(_repo_root()))).expanduser().resolve()
+    repo = Path(pop_opt(args, "--repo", str(_repo_root()))).expanduser().resolve()
     extra: list[str] = []
-    if k := _opt_from(args, "-k", ""):
+    if k := pop_opt(args, "-k", ""):
         extra += ["-k", k]
     if args:
         print(f"wcfm test: unrecognised arguments {args}", file=sys.stderr)
@@ -127,15 +128,6 @@ def _dist_cpu(args: list[str]) -> int:
     return subprocess.run(cmd, cwd=repo, check=False).returncode
 
 
-def _opt_from(args: list[str], name: str, default: str) -> str:
-    if name in args:
-        i = args.index(name)
-        value = args[i + 1] if i + 1 < len(args) else default
-        del args[i : i + 2]
-        return value
-    return default
-
-
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE)
@@ -158,17 +150,9 @@ def main(argv: list[str]) -> int:
     if dry_run:
         args.remove("--dry-run")
 
-    def _opt(name: str, default: str) -> str:
-        if name in args:
-            i = args.index(name)
-            value = args[i + 1] if i + 1 < len(args) else default
-            del args[i : i + 2]
-            return value
-        return default
-
-    pytest_k = _opt("-k", "")
-    repo = Path(_opt("--repo", str(_repo_root()))).expanduser().resolve()
-    gpus = int(_opt("--gpus", "2"))
+    pytest_k = pop_opt(args, "-k", "")
+    repo = Path(pop_opt(args, "--repo", str(_repo_root()))).expanduser().resolve()
+    gpus = int(pop_opt(args, "--gpus", "2"))
     if args:
         print(f"wcfm test: unrecognised arguments {args}", file=sys.stderr)
         return 2
@@ -256,6 +240,8 @@ request_gpus            = {gpus}
 request_disk            = {request_disk("20000000")}
 Requirements            = {os.environ.get("WCFM_GPU_REQUIREMENTS", DEFAULT_REQUIREMENTS)}
 should_transfer_files   = YES
+stream_output           = True
+stream_error            = True
 when_to_transfer_output = ON_EXIT
 transfer_input_files    = {archive}
 transfer_output_files   = ""

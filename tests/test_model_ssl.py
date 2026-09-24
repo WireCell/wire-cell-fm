@@ -430,6 +430,7 @@ def test_no_terms_is_refused():
     "config_cls,impl",
     [
         ("MinkUNetConfig", "wcfm.model.backbones:MinkUNetAttention"),
+        ("PolarMAEConfig", "wcfm.model.backbones:PolarMAEBackbone"),
         ("PixelMaskerConfig", "wcfm.model.augment:PixelMasker"),
         ("BlockMaskerConfig", "wcfm.model.augment:BlockMasker"),
         ("RegionMaskerConfig", "wcfm.model.augment:RegionMasker"),
@@ -437,6 +438,9 @@ def test_no_terms_is_refused():
         ("LogTransformConfig", "wcfm.model.augment:FeatureLogTransform"),
         ("EmaTeacherConfig", "wcfm.model.modules:EmaTeacher"),
         ("ChargeTermConfig", "wcfm.model.terms:ChargeTerm"),
+        ("ChamferTermConfig", "wcfm.model.terms:ChamferTerm"),
+        ("EnergyTermConfig", "wcfm.model.terms:EnergyTerm"),
+        ("PointMaeModuleConfig", "wcfm.model.modules:PointMaeModule"),
         ("DistillTermConfig", "wcfm.model.terms:DistillTerm"),
         ("DinoTermConfig", "wcfm.model.terms:DinoTerm"),
     ],

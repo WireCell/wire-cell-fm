@@ -1,0 +1,45 @@
+# @package _global_
+#
+# The pm4_w recipe of the PoLAr-MAE reference training, on our production: AdamW at 9.9e-5
+# with a 1000-step linear warmup from 3e-6 and a cosine to 3e-6, weight decay 0.05 held
+# constant, gradient clipping at 3, bf16, global batch 32 on two ranks, and 80,000 optimizer
+# steps, which on the 200k production is 13 epochs (their 2.4M-event pool made it one).
+#
+#   wcfm submit +experiment=polarmae_pm4w launch=multi_2gpu
+#
+# The reference thinned every event to at most 8000 pixels above 1 ADC and capped the tokens
+# at 512. Both thinning knobs are on the module and off here, so the backbone sees whole
+# events; set `model.max_points=8000 model.charge_threshold=1.0` to reproduce theirs. The
+# token cap is 2048: at overlap 0.5 the 200k production yields about one token per 20
+# pixels, 925 at the 99th percentile and 1019 at most over 96 events, so nothing is truncated.
+# Everything not set below is a schema default.
+
+defaults:
+  - override /model: polarmae
+  - override /data: prod_jay_200k_mixed_sharded
+  - override /launch: multi_2gpu
+  - _self_
+
+run:
+  name: wcfm_polarmae_pm4w
+  precision: bf16-mixed
+  save_every: 1
+
+data:
+  global_batch_size: 32   # per-rank 16 on two ranks, as the reference ran
+
+model:
+  backbone:
+    context_length: 2048  # schema default is 512, the reference's cap
+
+optim:
+  epochs: 13
+  lr: 9.9e-5
+  min_lr: 3.0e-6
+  weight_decay: 0.05
+  weight_decay_end: 0.05
+  clip_grad_norm: 3.0
+  schedules:
+    lr:
+      warmup_epochs: 0.16   # 1000 steps of 6246 per epoch
+      warmup_value: 3.0e-6
