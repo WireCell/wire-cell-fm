@@ -10,7 +10,7 @@
 # decompresses those datasets on every read.
 
 backend: sharded
-sharded_dir: /gpfs01/lbne/users/fm/cffm-data/shards_prod-jay-2026-06-11_mixed_apa0W
+sharded_dir: /gpfs01/lbne/users/fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W
 datadir: ""
 packed_path: ""
 global_batch_size: 100

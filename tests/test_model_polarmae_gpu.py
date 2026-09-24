@@ -28,7 +28,7 @@ from .fake_backbone import make_batch  # noqa: E402
 
 pytestmark = pytest.mark.gpu
 
-SHARD = "/gpfs01/lbne/users/fm/cffm-data/shards_prod-jay-2026-06-11_mixed_apa0W/shard_00000.h5"
+SHARD = "/gpfs01/lbne/users/fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W/shard_00000.h5"
 
 
 @pytest.fixture
