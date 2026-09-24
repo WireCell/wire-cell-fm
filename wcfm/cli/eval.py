@@ -51,7 +51,11 @@ submit options:
   --rows=all|pooled     row space                (default: all)
   --max-images=N        cap on EVENTS            (default: 10000)
   --eval-set-root=P     share an eval set across runs
+  --data=NAME           forwarded to every extract node (see extract options)
   --retry=N             Condor RETRY per node    (default: 2)
+  --maxjobs=N           extract nodes to run at once (default: unthrottled). Each holds every
+                        pixel's features in host RAM and doubles that concatenating them, so a
+                        wide backbone needs this to keep one node's jobs inside its memory
   --dry-run             write the DAG, submit nothing
 
 merge/compare options:
@@ -68,15 +72,21 @@ extract options:
   --sources=a,b       branches to write            (default: student,teacher; missing dropped)
   --taps=a,b          named intermediates as well as the final map  (default: none)
   --max-images=N      cap on EVENTS, not batches   (default: 10000)
-  --batch-size=N      throughput only   (default: the run's PER-RANK batch, because extraction
-                      is one process; warpconvnet's hash table packs the batch index into 9 bits
-                      and refuses more than 512 images in one forward)
+  --batch-size=N      (default: the run's PER-RANK batch, because extraction is one process;
+                      warpconvnet's hash table packs the batch index into 9 bits and refuses
+                      more than 512 images in one forward). It changes WHICH events are read
+                      unless --max-images binds: the readers drop a short final batch, so a cap
+                      at or above what the stream yields leaves a batch-size-dependent tail.
+                      Keep it fixed across runs that share an eval set, or cap below the yield
   --num-workers=N     loader workers               (default: 4)
   --rows=all|pooled   write every pixel, or only the pooled rows      (default: all)
   --pool-per-class=N  balanced pool size per class (default: 10000, probe_pid's own)
   --pool-seed=N       seed for the split and pools (default: 42)
   --device=cuda|cpu   (default: cuda if available)
   --eval-set-root=P   share an eval set across runs (default: <run_dir>/features/eval_set)
+  --data=NAME         score on `conf/data/<NAME>.yaml` instead of the run's own production.
+                      For a run trained on a set without per-pixel truth; the batch size,
+                      seed and charge transform still come from the run
   --out-root=P        where feature stores go       (default: <run_dir>/features)
   --gradients=N       also run the offline gradient probe over N batches (default: 0=off)
   --dry-run           resolve and print the plan, touch no GPU
@@ -139,6 +149,28 @@ def _charge_transform(cfg) -> tuple[str, dict]:
     return f"log[{lo},{hi}]", {"kind": "log", "min_val": float(lo), "max_val": float(hi)}
 
 
+def _data_option(name: str):
+    """`conf/data/<name>.yaml` over the `DataConfig` defaults, as `data=<name>` composes it.
+
+    Extraction forces per-pixel and extra truth on, so a run trained on a production without
+    them (`fdhd_2M_mixed_sharded`) can only be scored on another one. Raises `FileNotFoundError`
+    naming the options that exist.
+    """
+    from omegaconf import OmegaConf
+
+    from wcfm.cli.train import _conf_dir
+    from wcfm.config.schema import DataConfig
+
+    data_dir = _conf_dir([])[0] / "data"
+    path = data_dir / f"{name}.yaml"
+    if not path.exists():
+        options = sorted(p.stem for p in data_dir.glob("*.yaml"))
+        raise FileNotFoundError(f"no data option {name!r}; conf/data has {options}")
+    node = OmegaConf.load(path)
+    node.pop("defaults", None)
+    return OmegaConf.merge(OmegaConf.structured(DataConfig), node)
+
+
 def _git_sha(run_dir: Path) -> str:
     import json
 
@@ -195,13 +227,20 @@ def _extract(argv: list[str]) -> int:
     pool_seed = int(flags.get("pool-seed", 42))
     gradient_batches = int(flags.get("gradients", 0))
 
-    data_cfg = OmegaConf.create(OmegaConf.to_container(cfg.data, resolve=True))
+    if "data" in flags:
+        try:
+            data_cfg = _data_option(flags["data"])
+        except FileNotFoundError as exc:
+            print(f"wcfm eval extract: {exc}", file=sys.stderr)
+            return 2
+    else:
+        data_cfg = OmegaConf.create(OmegaConf.to_container(cfg.data, resolve=True))
     if "batch-size" in flags:
         data_cfg.global_batch_size = int(flags["batch-size"])
     else:
         # Extraction is ONE process, so it must not inherit a batch sized for the whole world.
-        # `global_batch_size` grows with `launch.devices`, so it is divided by the number of devices 
-        # to get the per-rank batch size.
+        # `global_batch_size` grows with `launch.devices`, so it is divided by the number
+        # of devices to get the per-rank batch size.
         devices = int(OmegaConf.select(cfg, "launch.devices", default=1) or 1)
         data_cfg.global_batch_size = per_rank_batch_size(
             int(cfg.data.global_batch_size), devices
@@ -216,6 +255,12 @@ def _extract(argv: list[str]) -> int:
     # score the same population. Without this the default invocation writes a `pools.npz` with
     # nothing in it but `row_index`, and the suite is back to each probe redrawing its own.
     data_cfg.return_pixel_truth = True
+    # `probe_overlap` requires `pixel_energyfrac` and `probe_instance` requires `pixel_trackid`
+    # (their `fx.require` calls), and both are pixel columns the reader only emits when asked.
+    # Without this the two stages fail every probes node, which fails the node, which stops the
+    # merge -- the whole DAG produces stores and no table. A production whose shards were built
+    # without `--with_extra_truth` raises here instead, naming the rebuild.
+    data_cfg.return_extra_truth = True
 
     device = flags.get("device") or ("cuda" if _cuda() else "cpu")
     seed = int(cfg.get("run", {}).get("seed", 42))
@@ -228,6 +273,11 @@ def _extract(argv: list[str]) -> int:
 
     print(f"run          {run_dir}")
     print(f"checkpoints  {[p.name for p in checkpoints]}")
+    source = data_cfg.get("sharded_dir") or data_cfg.get("packed_path") or data_cfg.get("datadir")
+    print(
+        f"data         {data_cfg.backend} {source}"
+        + (f"  (--data={flags['data']})" if "data" in flags else "")
+    )
     print(f"eval set     {eval_set_root}  (max_images={max_images}, batch_size={batch_size})")
     print(f"sources      {list(sources)}   taps {list(taps) or ['out only']}   rows={rows}")
     print(
@@ -464,6 +514,12 @@ def _submit(argv: list[str]) -> int:
     except FileNotFoundError as exc:
         print(f"wcfm eval submit: {exc}", file=sys.stderr)
         return 2
+    if "data" in flags:
+        try:
+            _data_option(flags["data"])
+        except FileNotFoundError as exc:
+            print(f"wcfm eval submit: {exc}", file=sys.stderr)
+            return 2
     out_root = Path(flags.get("out-root", run_dir / "features"))
     job_dir = out_root / "dag" / "job"
     user = os.environ.get("USER", "unknown")
@@ -479,6 +535,12 @@ def _submit(argv: list[str]) -> int:
         # `WCFM_CACHE_DIR`, the same name `wcfm submit` and `wcfm test` read. The default stays
         # the run's own sibling, which is where existing extractions already cache.
         cache=Path(os.environ.get("WCFM_CACHE_DIR", str(run_dir.parent / ".cache"))),
+        # `WCFM_REQUEST_MEMORY` (MB), the same name `wcfm submit` reads, and it sizes the
+        # EXTRACT nodes. Extraction accumulates every pixel's features in host RAM and then
+        # concatenates them while the per-batch parts are still referenced, so its peak is
+        # about twice `n_pixels * out_dim * 2` bytes. A 384-dim backbone over 55 M pixels needs
+        # ~128000; the default suits a narrow one and a wide backbone is held without it.
+        request_memory_gpu=os.environ.get("WCFM_REQUEST_MEMORY", DagPlan.request_memory_gpu),
         checkpoints=checkpoints,
         eval_set_root=Path(flags.get("eval-set-root", out_root / "eval_set")),
         stages=flags.get("stages", "pid,knn,overlap,instance,vertex,event,spectrum"),
@@ -487,6 +549,7 @@ def _submit(argv: list[str]) -> int:
         rows=flags.get("rows", "all"),
         max_images=int(flags.get("max-images", 10000)),
         retry=int(flags.get("retry", 2)),
+        extract_flags=(f"--data={flags['data']}",) if "data" in flags else (),
     )
 
     files = build_dag(plan)
@@ -517,14 +580,17 @@ def _submit(argv: list[str]) -> int:
             path.chmod(0o755)
     print(f"\nwrote {len(files)} files under {dag_path.parent}")
 
+    # Throttles the whole DAG, which in practice throttles the extract nodes: the probes are
+    # their children and one CPU slot each.
+    throttle = ["-maxjobs", flags["maxjobs"]] if flags.get("maxjobs") else []
     if not shutil.which("condor_submit_dag"):
         print(
             "wcfm eval submit: condor_submit_dag not on PATH; submit from a login node with\n"
-            f"  condor_submit_dag {dag_path}",
+            f"  condor_submit_dag {' '.join(throttle)} {dag_path}".replace("  ", " "),
             file=sys.stderr,
         )
         return 2
-    completed = subprocess.run(["condor_submit_dag", str(dag_path)], check=False)
+    completed = subprocess.run(["condor_submit_dag", *throttle, str(dag_path)], check=False)
     print(f"\nWatch with:  condor_q -nobatch ; tail -F {dag_path.parent}/logs/*.out")
     return completed.returncode
 

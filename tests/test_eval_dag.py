@@ -101,6 +101,7 @@ def test_only_extraction_asks_for_a_gpu(tmp_path):
     CPU slot."""
     files = build_dag(_plan(tmp_path))
     subs = {k.name: v for k, v in files.items() if k.suffix == ".sub"}
+
     def gpus(sub: str) -> str:
         return re.search(r"request_gpus\s*=\s*(\S+)", sub).group(1)
 
@@ -151,6 +152,15 @@ def test_each_extract_node_is_pinned_to_its_own_epoch(tmp_path):
     subs = {k.name: v for k, v in build_dag(_plan(tmp_path)).items() if k.suffix == ".sub"}
     assert "'--epochs=5'" in subs["extract_ep5.sub"]
     assert "'--epochs=1'" not in subs["extract_ep5.sub"]
+
+
+def test_extract_flags_reach_every_extract_node(tmp_path):
+    """`wcfm eval submit --data=NAME` travels this way; the probes need nothing."""
+    plan = _plan(tmp_path, extract_flags=("--data=prod",))
+    subs = {k.name: v for k, v in build_dag(plan).items() if k.suffix == ".sub"}
+    for e in (1, 5, 10):
+        assert "'--data=prod'" in subs[f"extract_ep{e}.sub"]
+        assert "--data" not in subs[f"probes_ep{e}.sub"]
 
 
 def test_all_nodes_share_one_eval_set_so_the_epochs_are_comparable(tmp_path):
