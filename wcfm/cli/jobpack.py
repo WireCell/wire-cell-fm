@@ -31,6 +31,7 @@ __all__ = [
     "check_repo",
     "git_environment",
     "pack_repo",
+    "pop_opt",
     "request_disk",
     "stage_executable",
 ]
@@ -157,6 +158,24 @@ def git_environment(repo: Path) -> str:
         f"WCFM_GIT_SHA={sha} WCFM_GIT_BRANCH={branch} "
         f"WCFM_GIT_DIRTY={1 if status else 0}"
     )
+
+
+def pop_opt(args: list[str], name: str, default: str | None = None) -> str | None:
+    """Remove `name VALUE` or `name=VALUE` from `args` and return VALUE, else `default`.
+
+    The submit commands take a few options of their own ahead of arguments they pass through
+    untouched -- Hydra overrides, a module's argv -- so they cannot hand the whole list to
+    argparse. `args` is edited in place.
+    """
+    for i, arg in enumerate(args):
+        if arg == name:
+            value = args[i + 1] if i + 1 < len(args) else default
+            del args[i : i + 2]
+            return value
+        if arg.startswith(name + "="):
+            del args[i]
+            return arg.split("=", 1)[1]
+    return default
 
 
 def request_disk(default_kib: str) -> str:

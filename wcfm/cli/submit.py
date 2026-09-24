@@ -24,6 +24,7 @@ from wcfm.cli.jobpack import (
     check_repo,
     git_environment,
     pack_repo,
+    pop_opt,
     request_disk,
     stage_executable,
 )
@@ -58,18 +59,6 @@ produced two ranks each building a one-device Fabric.
 DEFAULT_REQUIREMENTS = '(GPUs_DeviceName == "NVIDIA L40S") && (GPUs_Capability == 8.9)'
 
 
-def _pop_opt(args: list[str], name: str, default: str | None = None) -> str | None:
-    for i, arg in enumerate(args):
-        if arg == name:
-            value = args[i + 1] if i + 1 < len(args) else default
-            del args[i : i + 2]
-            return value
-        if arg.startswith(name + "="):
-            del args[i]
-            return arg.split("=", 1)[1]
-    return default
-
-
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(USAGE)
@@ -99,7 +88,7 @@ def main(argv: list[str]) -> int:
 
     from wcfm.cli.train import _conf_dir
 
-    repo = Path(_pop_opt(args, "--repo", "") or "").expanduser()
+    repo = Path(pop_opt(args, "--repo", "") or "").expanduser()
     config_dir, overrides = _conf_dir(args)
     repo = repo.resolve() if str(repo) else config_dir.parent
 
