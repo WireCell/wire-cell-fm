@@ -1,0 +1,33 @@
+# @package _global_
+#
+# The reference's pure-SSL baseline, pm3_b80k, on the 2M mixed production: global batch 16
+# (per-rank 8 on two ranks), AdamW 7e-5 with a 2000-step warmup, and the tokenizer at
+# `overlap_factor 0.72`, the value every reference training used; 0.5 was their export-time
+# regrouping. At batch 16 an epoch is 127,500 optimizer steps, so one epoch is the run; the
+# reference ran 80,000. A checkpoint every two hours gives snapshots between the epoch ends.
+#
+#   env WCFM_REQUEST_MEMORY=48000 WCFM_REQUEST_CPUS=10 wcfm submit +experiment=polarmae_2M_b80k
+#
+# Everything not set below comes from polarmae_2M.
+
+defaults:
+  - polarmae_2M
+  - _self_
+
+run:
+  name: wcfm_polarmae_2M_b80k
+  save_every_minutes: 120
+
+data:
+  global_batch_size: 16   # per-rank 8 on two ranks
+
+model:
+  backbone:
+    overlap_factor: 0.72
+
+optim:
+  epochs: 1
+  lr: 7.0e-5
+  schedules:
+    lr:
+      warmup_epochs: 0.0157   # 2000 steps of 127,500 per epoch

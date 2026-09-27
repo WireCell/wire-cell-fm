@@ -55,6 +55,19 @@ Consequences to hold in mind when changing either side:
   a view over the streams that no job writes or syncs.
 - Check a composition before spending a queue slot: `wcfm train --dry-run <overrides>`.
 
+## Data
+
+- Training reads `conf/data/fdhd_2M_mixed_200k.yaml`, the first 200,000 events of the 2M mixed
+  production, through `conf/config.yaml`'s `data:` default. A preset says `override /data:` only
+  to leave it, and `fdhd_2M_mixed_sharded` is the whole set for the preset that wants it. No
+  preset restates `n_subset`; the subset is the data option's.
+- Evaluation reads `prod_jay_200k_mixed_sharded`, the production with per-pixel truth, through
+  `wcfm eval`'s `--data` default: 10,000 of its events per eval set (`--max-images`), one
+  `--eval-set-root` shared across the runs being compared. Its runs are disjoint from the 2M
+  production, so every probe table is out of sample. A run is never scored on what it trained on.
+- `wcfm submit` under an existing `run.name` resumes that run, so a preset whose data changed
+  keeps its name only if the old run directory has moved.
+
 ## Changing code
 
 - One implementation per behaviour. When two functions, two tests or two config paths do the

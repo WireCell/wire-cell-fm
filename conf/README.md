@@ -40,14 +40,14 @@ merger plus a `_target_` to `__init__` caller.
 | Group | Default | Other options | What it is |
 |---|---|---|---|
 | `model/` | `mae` | `dino`, `hybrid`, `kd`, `polarmae` | the training objective |
-| `data/` | `prod_jay_200k_mixed_sharded` | `prod_jay_200k_mixed_packed`, `prod_jay_100k`, `fdhd_2M_mixed_sharded` | which production, and how to read it |
+| `data/` | `fdhd_2M_mixed_200k` | `fdhd_2M_mixed_sharded`, `prod_jay_200k_mixed_sharded`, `prod_jay_200k_mixed_packed`, `prod_jay_100k` | which production, and how to read it |
 | `optim/` | `adamw_cosine` | — | the optimizer and its schedules |
 | `run/` | `default` | — | name, seed, precision, resume, checkpoint cadence |
 | `metrics/` | `default` | `minimal`, `full` | which collectors run |
 | `launch/` | `single_gpu` | `multi_2gpu`, `multi_6gpu` | devices, strategy, DDP flags |
 | `experiment/` | — | `+experiment=<name>` | a whole run pinned as one file |
 
-The `data/` blocks are three productions across three readers:
+The `data/` blocks are three productions across three readers, plus the training default:
 
 | Block | Reader | Events | Where |
 |---|---|---|---|
@@ -55,11 +55,16 @@ The `data/` blocks are three productions across three readers:
 | `prod_jay_200k_mixed_packed` | `packed` — one 27.8 GB `.npz` held in RAM | 199,870 | `fm/cffm-data/packed/packed_fhdh_sparse_200k_mixed_apa0W.npz` |
 | `prod_jay_100k` | `direct` — reads the production tree | ~100k | `bnayak/cffm-data/prod-jay-100k-truth-2026-06-11` |
 | `fdhd_2M_mixed_sharded` | `sharded` — ~500 shards of 4000, event truth only | ~2.0M | `fm/cffm-data/shards_fdhd_sparse_2M_mixed_apa0W` |
+| `fdhd_2M_mixed_200k` | the block above, `n_subset: 200000` — its first 50 shards | 200,000 | same |
 
 The two `200k_mixed` blocks are the *same events*, so a run can change reader without changing
 what it trains on. `packed` needs `request_memory` well above `wcfm submit`'s 32 GB default.
-`fdhd_2M_mixed_sharded` is the training set: numu and nue productions shuffled together, with
-no per-pixel truth, so evaluation stays on the 200k set, whose runs are disjoint from it. A shard
+Training runs on `fdhd_2M_mixed_200k` unless a preset overrides it: the 2M production is numu
+and nue shuffled together at creation, so its first 50 shards are an unbiased 200k sample, and a
+preset that wants the whole set selects `fdhd_2M_mixed_sharded`. Neither carries per-pixel truth,
+so `wcfm eval` scores every run on `prod_jay_200k_mixed_sharded` (its `--data` default, 10,000
+events of it per eval set), whose runs are disjoint from the 2M production: every probe table is
+out of sample. A shard
 set is built by `wcfm datagen <job> create_shards ...`, which queues
 `wcfm.data.prep.create_shards` on a CPU worker; `python -m wcfm.data.prep.create_shards --help`
 lists the arguments, and an archived production is first unpacked with

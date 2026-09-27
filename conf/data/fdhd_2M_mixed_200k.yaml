@@ -1,0 +1,9 @@
+# The default training set: the first 200,000 events of `fdhd_2M_mixed_sharded`, which is
+# 50 of its shards of 4,000. The shards are creation-shuffled, so the prefix is an unbiased
+# sample of the mixed numu+nue production. Everything else is that block: event-level truth
+# only, so `data.return_pixel_truth=true` fails here, and evaluation is scored on
+# `prod_jay_200k_mixed_sharded` (the `wcfm eval` default), whose runs are disjoint from these.
+# A preset that wants the whole 2M selects `override /data: fdhd_2M_mixed_sharded`.
+defaults:
+  - fdhd_2M_mixed_sharded
+n_subset: 200000
