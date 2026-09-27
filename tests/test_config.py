@@ -63,6 +63,18 @@ def test_model_and_experiment_files_declare_package_global(group: str):
     assert not offenders, f"missing '{PACKAGE_GLOBAL}' as the first line: {offenders}"
 
 
+def test_the_default_training_set_is_the_200k_prefix_of_the_2m_production(hydra_conf):
+    """Every preset trains on it unless it says `override /data:`; the subset is the data
+    option's, so no preset restates `n_subset`."""
+    cfg = compose(config_name="config", overrides=["model=_stub"])
+    assert cfg.data.sharded_dir.endswith("shards_fdhd_sparse_2M_mixed_apa0W")
+    assert cfg.data.n_subset == 200000
+    restating = [
+        p.name for p in (CONF / "experiment").glob("*.yaml") if "n_subset" in p.read_text()
+    ]
+    assert not restating, restating
+
+
 def test_hydra_does_not_change_the_working_directory(hydra_conf):
     """The Condor job manages its own cwd and rsync layout."""
     cfg = compose(config_name="config", overrides=["model=_stub"], return_hydra_config=True)

@@ -17,13 +17,16 @@ from typing import Any
 
 __all__ = ["KEY_DASHES", "ROLE", "ROLE_LABEL", "figure", "pyplot", "run_colors", "save"]
 
-#: Line style per role. `feat` takes the run's own colour; `raw` and `chance` are drawn in the
-#: run's colour too, so a two-run overlay stays readable, but never as a solid line.
+#: Line style per role. `feat` takes the run's own colour. `raw` and `chance` are never a solid
+#: line; `wcfm.plotting.probes._draw` gives them the run's colour only when runs disagree.
 ROLE: dict[str, dict[str, Any]] = {
     "feat": {"linestyle": "-", "linewidth": 1.8, "marker": "o", "markersize": 3.5},
     "raw": {"linestyle": "--", "linewidth": 1.2, "marker": "s", "markersize": 2.5, "alpha": 0.75},
     "chance": {"linestyle": ":", "linewidth": 1.2, "marker": "", "alpha": 0.6},
 }
+
+#: Colour of a baseline every run on the axes shares, drawn once.
+SHARED_BASELINE = "#555555"
 
 #: What a role is called in a legend. `raw` is the same head fitted on raw charge, which is the
 #: only thing that says whether the representation did any work.

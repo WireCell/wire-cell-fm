@@ -178,3 +178,36 @@ def test_cli_rejects_an_unknown_figure(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
     assert main([str(run), "--figures=nonesuch"]) == 2
+
+
+def _legend_after_draw(raws):
+    """Labels `_draw` leaves on one axis for two runs whose raw baselines are `raws`."""
+    from wcfm.plotting.probes import _draw
+    from wcfm.plotting.style import pyplot, run_colors
+
+    curves = {
+        run: [(10, {"f": 0.3, "r": raw}), (20, {"f": 0.35, "r": raw})]
+        for run, raw in zip(("a", "b"), raws, strict=True)
+    }
+    fig, ax = pyplot().subplots()
+    _draw(ax, curves, run_colors(sorted(curves)), {"feat": "f", "raw": "r", "chance": 0.14})
+    labels = ax.get_legend_handles_labels()[1]
+    pyplot().close(fig)
+    return labels
+
+
+def test_a_baseline_every_run_shares_is_drawn_once():
+    pytest.importorskip("matplotlib")
+    assert _legend_after_draw((0.19, 0.19)) == ["a", "b", "raw charge", "chance"]
+
+
+def test_a_baseline_that_differs_between_runs_keeps_a_line_per_run():
+    """Two eval sets drawn as one line would hide that the runs were scored differently."""
+    pytest.importorskip("matplotlib")
+    assert _legend_after_draw((0.19, 0.25)) == [
+        "a",
+        "b",
+        "a (raw charge)",
+        "b (raw charge)",
+        "chance",
+    ]

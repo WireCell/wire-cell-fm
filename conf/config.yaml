@@ -3,7 +3,7 @@
 defaults:
   - base_config          # the typed schema registered by wcfm.config.store
   - run: default
-  - data: prod_jay_200k_mixed_sharded
+  - data: fdhd_2M_mixed_200k
   - optim: adamw_cosine
   - metrics: default
   - launch: single_gpu

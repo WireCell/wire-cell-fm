@@ -28,7 +28,7 @@ from typing import Any
 
 from wcfm.eval.compare import dig, epoch_of, load_all, run_of, source_of
 
-from .style import ROLE, ROLE_LABEL, figure, run_colors, save
+from .style import ROLE, ROLE_LABEL, SHARED_BASELINE, figure, run_colors, save
 
 __all__ = ["PROBE_PANELS", "plot_probes", "probe_files"]
 
@@ -212,6 +212,51 @@ def _series(entries: list[tuple[int, dict]], path: Path_t) -> tuple[list[int], l
     return [ep for ep, _ in pts], [v for _, v in pts]
 
 
+def _draw(ax, curves, colors, roles: dict[str, Path_t]) -> bool:
+    """Draw every run's `feat` curve in its colour, and each baseline role on top.
+
+    A baseline (`raw`, `chance`) that every run records with the same value at the epochs they
+    share is one line in `SHARED_BASELINE`, labelled by its role alone: runs scored on one eval
+    set have identical baselines, and a copy per run fills the legend. A baseline that differs
+    between runs keeps one line per run in the run's colour, since two eval sets drawn as one
+    line would hide that the runs were not scored on the same population. Returns whether
+    anything was drawn.
+    """
+    drew = False
+    for role, path in roles.items():
+        series = {k: _series(e, path) for k, e in sorted(curves.items())}
+        series = {k: (xs, ys) for k, (xs, ys) in series.items() if xs}
+        if not series:
+            continue
+        drew = True
+        if role != "feat" and _agree(series.values()):
+            merged = {x: y for xs, ys in series.values() for x, y in zip(xs, ys, strict=True)}
+            xs = sorted(merged)
+            color = next(iter(colors.values())) if len(curves) == 1 else SHARED_BASELINE
+            ax.plot(xs, [merged[x] for x in xs], color=color, label=ROLE_LABEL[role], **ROLE[role])
+            continue
+        for key, (xs, ys) in series.items():
+            # One run on the axes: the legend is about the roles. Several: the run name is the
+            # point, and the roles are told apart by line style.
+            if len(curves) == 1:
+                label = ROLE_LABEL[role]
+            else:
+                label = key if role == "feat" else f"{key} ({ROLE_LABEL[role]})"
+            ax.plot(xs, ys, color=colors[key], label=label, **ROLE[role])
+    return drew
+
+
+def _agree(series, tol: float = 1e-9) -> bool:
+    """Whether every series gives the same value at every epoch another one also has."""
+    seen: dict[int, float] = {}
+    for xs, ys in series:
+        for x, y in zip(xs, ys, strict=True):
+            if x in seen and abs(seen[x] - y) > tol:
+                return False
+            seen.setdefault(x, y)
+    return True
+
+
 def _style_axis(ax, title: str, ylabel: str, legend: bool = True):
     ax.set_title(title, fontsize=10)
     ax.set_xlabel("epoch", fontsize=9)
@@ -281,18 +326,7 @@ def _trajectories(curves, colors, out_dir, fmt) -> Path | None:
         return None
     fig, axes = figure(len(live), ncols=3, height=2.8, width=4.4)
     for ax, (title, ylabel, roles) in zip(axes, live, strict=True):
-        for key, entries in sorted(curves.items()):
-            for role, path in roles.items():
-                xs, ys = _series(entries, path)
-                if not xs:
-                    continue
-                # One run on the axes: the legend is about the roles. Several: the run name is
-                # the point, and the roles are told apart by line style.
-                if len(curves) == 1:
-                    label = ROLE_LABEL[role]
-                else:
-                    label = key if role == "feat" else f"{key} ({ROLE_LABEL[role]})"
-                ax.plot(xs, ys, color=colors[key], label=label, **ROLE[role])
+        _draw(ax, curves, colors, roles)
         _style_axis(ax, title, ylabel)
     return save(fig, out_dir, "probes", fmt)
 
@@ -330,18 +364,8 @@ def _per_class(
     fig, axes = figure(len(classes), ncols=3, height=2.8, width=4.4)
     drew = False
     for ax, cls in zip(axes, classes, strict=True):
-        for key, entries in sorted(curves.items()):
-            roles = {"feat": feat(cls)} if raw is None else {"feat": feat(cls), "raw": raw(cls)}
-            for role, path in roles.items():
-                xs, ys = _series(entries, path)
-                if not xs:
-                    continue
-                drew = True
-                if len(curves) == 1:
-                    label = ROLE_LABEL[role]
-                else:
-                    label = key if role == "feat" else f"{key} ({ROLE_LABEL[role]})"
-                ax.plot(xs, ys, color=colors[key], label=label, **ROLE[role])
+        roles = {"feat": feat(cls)} if raw is None else {"feat": feat(cls), "raw": raw(cls)}
+        drew = _draw(ax, curves, colors, roles) or drew
         _style_axis(ax, cls, ylabel)
     if not drew:
         from .style import pyplot
