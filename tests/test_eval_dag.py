@@ -133,9 +133,10 @@ def test_the_pre_script_compares_checkpoint_hashes_not_timestamps(tmp_path):
     assert "SCRIPT PRE extract_ep5" in dag
     assert "checkpoint_sha256" in stale
     assert "sha256sum" in stale
-    # Exit 1 from a PRE script is DAGMan's "skip this node", which is what "already current"
-    # has to mean here.
+    # A non-zero PRE fails the node unless the DAG names that code in PRE_SKIP; without the
+    # line an already-current extraction fails after its retries and its probes never run.
     assert "exit 1" in stale
+    assert "PRE_SKIP extract_ep5 1" in dag
 
 
 def test_probe_json_goes_to_one_directory_per_run_not_per_epoch(tmp_path):
@@ -164,10 +165,18 @@ def test_extract_flags_reach_every_extract_node(tmp_path):
 
 
 def test_all_nodes_share_one_eval_set_so_the_epochs_are_comparable(tmp_path):
-    subs = {k.name: v for k, v in build_dag(_plan(tmp_path)).items() if k.suffix == ".sub"}
-    root = str(tmp_path / "runs" / "hybrid_a" / "features" / "eval_set")
+    """A set outside the run, as `--eval-set-root` shares one across runs. The probe node needs
+    it too: its default is `<store>/../eval_set`, where such a set is not."""
+    root = tmp_path / "other_run" / "features" / "eval_set"
+    subs = {
+        k.name: v
+        for k, v in build_dag(_plan(tmp_path, eval_set_root=root)).items()
+        if k.suffix == ".sub"
+    }
     for e in (1, 5, 10):
         assert f"'--eval-set-root={root}'" in subs[f"extract_ep{e}.sub"]
+        probe_args = re.search(r'arguments += +"(.*)"', subs[f"probes_ep{e}.sub"]).group(1)
+        assert probe_args.split()[-1] == str(root)
 
 
 def test_build_dag_writes_nothing(tmp_path):

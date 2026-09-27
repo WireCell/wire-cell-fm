@@ -41,6 +41,7 @@ probe options:
   --tap=NAME            tap to score            (default: out)
   --seed=N              seeds the HEADS, not the population  (default: 0)
   --device=cpu|cuda     (default: cpu)
+  --eval-set-root=P     the set the store was extracted against (default: <store>/../eval_set)
 
 submit options:
   --epochs=1,5,10       which checkpoints        (default: all in checkpoints/)
@@ -84,9 +85,10 @@ extract options:
   --pool-seed=N       seed for the split and pools (default: 42)
   --device=cuda|cpu   (default: cuda if available)
   --eval-set-root=P   share an eval set across runs (default: <run_dir>/features/eval_set)
-  --data=NAME         score on `conf/data/<NAME>.yaml` instead of the run's own production.
-                      For a run trained on a set without per-pixel truth; the batch size,
-                      seed and charge transform still come from the run
+  --data=NAME         the production to score on (default: prod_jay_200k_mixed_sharded,
+                      the one with per-pixel truth). Never the run's own: training runs on
+                      the 2M set, which has none. The batch size, seed and charge transform
+                      still come from the run
   --out-root=P        where feature stores go       (default: <run_dir>/features)
   --gradients=N       also run the offline gradient probe over N batches (default: 0=off)
   --dry-run           resolve and print the plan, touch no GPU
@@ -149,12 +151,18 @@ def _charge_transform(cfg) -> tuple[str, dict]:
     return f"log[{lo},{hi}]", {"kind": "log", "min_val": float(lo), "max_val": float(hi)}
 
 
+EVAL_DATA = "prod_jay_200k_mixed_sharded"
+"""The production extraction reads unless `--data` says otherwise. Extraction forces per-pixel
+and extra truth on, and the training set (`fdhd_2M_mixed_200k` and its parent) carries neither,
+so a run is never scored on its own production; this one has the truth and its runs are disjoint
+from the 2M set's."""
+
+
 def _data_option(name: str):
     """`conf/data/<name>.yaml` over the `DataConfig` defaults, as `data=<name>` composes it.
 
-    Extraction forces per-pixel and extra truth on, so a run trained on a production without
-    them (`fdhd_2M_mixed_sharded`) can only be scored on another one. Raises `FileNotFoundError`
-    naming the options that exist.
+    A `defaults:` list in the file is dropped, not composed, so the option must be a complete
+    block. Raises `FileNotFoundError` naming the options that exist.
     """
     from omegaconf import OmegaConf
 
@@ -227,14 +235,11 @@ def _extract(argv: list[str]) -> int:
     pool_seed = int(flags.get("pool-seed", 42))
     gradient_batches = int(flags.get("gradients", 0))
 
-    if "data" in flags:
-        try:
-            data_cfg = _data_option(flags["data"])
-        except FileNotFoundError as exc:
-            print(f"wcfm eval extract: {exc}", file=sys.stderr)
-            return 2
-    else:
-        data_cfg = OmegaConf.create(OmegaConf.to_container(cfg.data, resolve=True))
+    try:
+        data_cfg = _data_option(flags.get("data", EVAL_DATA))
+    except FileNotFoundError as exc:
+        print(f"wcfm eval extract: {exc}", file=sys.stderr)
+        return 2
     if "batch-size" in flags:
         data_cfg.global_batch_size = int(flags["batch-size"])
     else:
@@ -274,10 +279,7 @@ def _extract(argv: list[str]) -> int:
     print(f"run          {run_dir}")
     print(f"checkpoints  {[p.name for p in checkpoints]}")
     source = data_cfg.get("sharded_dir") or data_cfg.get("packed_path") or data_cfg.get("datadir")
-    print(
-        f"data         {data_cfg.backend} {source}"
-        + (f"  (--data={flags['data']})" if "data" in flags else "")
-    )
+    print(f"data         {data_cfg.backend} {source}  (--data={flags.get('data', EVAL_DATA)})")
     print(f"eval set     {eval_set_root}  (max_images={max_images}, batch_size={batch_size})")
     print(f"sources      {list(sources)}   taps {list(taps) or ['out only']}   rows={rows}")
     print(
@@ -362,6 +364,7 @@ def _probe(argv: list[str]) -> int:
         tap=flags.get("tap", "out"),
         seed=int(flags.get("seed", 0)),
         device=flags.get("device", "cpu"),
+        eval_set_root=flags.get("eval-set-root"),
     )
 
 

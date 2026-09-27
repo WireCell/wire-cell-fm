@@ -202,7 +202,9 @@ def instance_metric(fx: Features, raw: np.ndarray, seed: int, k: int, device: st
 
 
 def run_one(store_root: Path, args) -> dict:
-    fx = load_features(store_root, source=args.source, tap=args.tap)
+    fx = load_features(
+        store_root, source=args.source, tap=args.tap, eval_set_root=args.eval_set_root
+    )
     fx.require("pixel_labels", "pixel_trackid")
     print(f"\n=== {run_label(store_root, args.source)} ===")
 

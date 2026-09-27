@@ -55,6 +55,12 @@ def add_common(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "extraction's and is recorded in provenance (default: 0)",
     )
     ap.add_argument("--device", default="cpu", help="torch device for the heads (default: cpu)")
+    ap.add_argument(
+        "--eval-set-root",
+        default=None,
+        help="the eval set the store was extracted against (default: <store>/../eval_set); "
+        "a store extracted with `--eval-set-root` elsewhere fails to load without it",
+    )
     return ap
 
 
@@ -82,6 +88,7 @@ def run_stages(
     tap: str = "out",
     seed: int = 0,
     device: str = "cpu",
+    eval_set_root: str | None = None,
 ) -> int:
     """Score every named stage against every store. Returns a process exit status.
 
@@ -117,6 +124,7 @@ def run_stages(
                     f"--tap={tap}",
                     f"--seed={seed}",
                     f"--device={device}",
+                    *([f"--eval-set-root={eval_set_root}"] if eval_set_root else []),
                 ]
                 mod.main(argv)
             except (Exception, SystemExit):  # noqa: BLE001 -- one stage must not end the job

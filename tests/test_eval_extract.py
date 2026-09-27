@@ -328,6 +328,67 @@ def test_row_index_joins_features_to_truth_in_both_row_spaces(tmp_path):
     assert np.array_equal(ff[fp["pid_train"]], pf[pp["pid_train"]])
 
 
+def test_streamed_event_vectors_equal_pooling_the_whole_block(tmp_path):
+    """Event vectors are pooled batch by batch while the block is streamed to disk; they must
+    be exactly what `mean_pool` over the full block and the whole-set sample gives."""
+    from wcfm.eval.pools import EVENT_POOLED_FROM, PoolSpec, draw_pools, mean_pool
+
+    ckpt = tmp_path / "c.pt"
+    write_checkpoint(ckpt)
+    data = labelled(4)
+    res = extract(
+        ckpt, store_root=tmp_path / "f", eval_set_root=tmp_path / "e",
+        loader=data, rows="pooled", pool_per_class=2, sources=("student",),
+    )
+    full = extract(
+        ckpt, store_root=tmp_path / "all", eval_set_root=tmp_path / "e",
+        loader=data, rows="all", pool_per_class=2, sources=("student",),
+    )
+    root = tmp_path / "e"
+    es = res.eval_set
+    arrays = {n: np.asarray(es.read(root, n)) for n in es.truth_arrays}
+    geometry = {n: arrays.pop(n) for n in ("positions", "charges", "offsets")}
+    spec = PoolSpec(per_class=2)
+    sample = draw_pools(truth=arrays, geometry=geometry, spec=spec, apa=-1, view="")[
+        EVENT_POOLED_FROM
+    ]
+    block = np.asarray(FeatureStore(tmp_path / "all").features("student", OUT_TAP))
+    assert block.shape[0] == full.n_pixels
+    want = mean_pool(block, sample, geometry["offsets"], es.n_events)
+    assert len(data) > 1 and len(sample) and not np.isnan(want).all()
+    for store in ("f", "all"):
+        got = np.asarray(FeatureStore(tmp_path / store).event_means("student", OUT_TAP))
+        assert np.array_equal(got, want, equal_nan=True)
+
+
+def test_the_set_not_the_loader_order_places_each_event(tmp_path):
+    """A multi-worker loader at another batch size reads the set's events in another order and
+    past its end. The store must come out identical, in the set's order."""
+    ckpt = tmp_path / "c.pt"
+    write_checkpoint(ckpt)
+    data = labelled(4)
+    kw = dict(eval_set_root=tmp_path / "e", rows="pooled", pool_per_class=2, sources=("student",))
+    extract(ckpt, store_root=tmp_path / "a", loader=data, max_images=9, **kw)
+    extract(ckpt, store_root=tmp_path / "b", loader=data[::-1], max_images=9, **kw)
+
+    a, b = FeatureStore(tmp_path / "a"), FeatureStore(tmp_path / "b")
+    assert np.array_equal(a.features("student", OUT_TAP), b.features("student", OUT_TAP))
+    assert np.array_equal(
+        a.event_means("student", OUT_TAP), b.event_means("student", OUT_TAP), equal_nan=True
+    )
+
+
+def test_a_pass_that_misses_events_is_refused_and_leaves_no_block(tmp_path):
+    ckpt = tmp_path / "c.pt"
+    write_checkpoint(ckpt)
+    data = labelled(4)
+    kw = dict(eval_set_root=tmp_path / "e", rows="pooled", pool_per_class=2, sources=("student",))
+    extract(ckpt, store_root=tmp_path / "a", loader=data, **kw)
+    with pytest.raises(ValueError, match="never appeared"):
+        extract(ckpt, store_root=tmp_path / "b", loader=data[:2], **kw)
+    assert not list((tmp_path / "b").glob("*.tmp"))
+
+
 def test_pooled_rows_need_pixel_truth(tmp_path):
     ckpt = tmp_path / "c.pt"
     write_checkpoint(ckpt)

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -199,6 +200,45 @@ class Provenance:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass
+class FeatureBlock:
+    """A feature block being filled on disk, from `FeatureStore.open_features`.
+
+    Rows go in with `os.pwrite`, never through a memory map: pages written through a map stay
+    resident in the writing process and count toward its RSS, which then grows to the size of
+    the whole block -- 32 GB for a 384-dim branch over the instance pool. Written pages sit in
+    the page cache instead, which the kernel reclaims.
+    """
+
+    tmp: Path
+    path: Path
+    offset: int
+    dim: int
+    fd: int = -1
+
+    def write(self, start: int, rows: np.ndarray) -> None:
+        """Write `rows` as rows `start, start + 1, ...` of the block."""
+        if self.fd < 0:
+            self.fd = os.open(self.tmp, os.O_WRONLY)
+        data = np.ascontiguousarray(rows, dtype=np.float16).tobytes()
+        os.pwrite(self.fd, data, self.offset + int(start) * self.dim * 2)
+
+    def commit(self) -> Path:
+        """Move the finished block to its final name."""
+        self._close()
+        self.tmp.replace(self.path)
+        return self.path
+
+    def discard(self) -> None:
+        self._close()
+        self.tmp.unlink(missing_ok=True)
+
+    def _close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
 class FeatureStore:
     """One checkpoint's extraction output: features per `(source, tap)`, pools, provenance.
 
@@ -224,6 +264,26 @@ class FeatureStore:
         path = self.root / f"{_slug(source)}__{_slug(tap)}.npy"
         _write_npy(path, arr.astype(np.float16, copy=False))
         return path
+
+    def open_features(self, source: str, tap: str, n_rows: int, dim: int) -> FeatureBlock:
+        """An `[n_rows, dim]` fp16 block on disk, filled by the caller through `FeatureBlock`.
+
+        It lives at the `.tmp` name until `FeatureBlock.commit` renames it, for the reason
+        `_write_npy` gives: a reader must never see a half-written block.
+        """
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.root / f"{_slug(source)}__{_slug(tap)}.npy"
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        header = {
+            "descr": np.lib.format.dtype_to_descr(np.dtype(np.float16)),
+            "fortran_order": False,
+            "shape": (int(n_rows), int(dim)),
+        }
+        with open(tmp, "wb") as fh:
+            np.lib.format.write_array_header_1_0(fh, header)
+            offset = fh.tell()
+            fh.truncate(offset + int(n_rows) * int(dim) * 2)
+        return FeatureBlock(tmp=tmp, path=path, offset=offset, dim=int(dim))
 
     def write_pools(self, *, row_index: np.ndarray, **pools: np.ndarray) -> Path:
         """The balanced pools, drawn at extraction time.

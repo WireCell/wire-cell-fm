@@ -243,7 +243,9 @@ def pid_metric(fx: Features, raw: np.ndarray, seed: int, device: str) -> dict:
 
 
 def run_one(store_root: Path, args) -> dict:
-    fx = load_features(store_root, source=args.source, tap=args.tap)
+    fx = load_features(
+        store_root, source=args.source, tap=args.tap, eval_set_root=args.eval_set_root
+    )
     fx.require("pixel_labels")
 
     print(f"\n=== {run_label(store_root, args.source)} ===")

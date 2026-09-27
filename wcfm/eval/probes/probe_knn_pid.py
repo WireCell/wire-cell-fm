@@ -138,7 +138,10 @@ def run_one(store_root: Path, args) -> dict:
     if not sources:
         raise SystemExit(f"{store_root} records no branches to score")
 
-    fxs = {src: load_features(store_root, source=src, tap=args.tap) for src in sources}
+    fxs = {
+        src: load_features(store_root, source=src, tap=args.tap, eval_set_root=args.eval_set_root)
+        for src in sources
+    }
     fx0 = fxs[sources[0]]
     fx0.require("pixel_labels")
 

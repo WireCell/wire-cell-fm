@@ -179,6 +179,15 @@ def test_sources_and_taps_reach_the_plan(run_dir, capsys):
     assert "['student']" in out and "['dec_half']" in out
 
 
+def test_extraction_reads_the_truth_production_by_default_not_the_runs(run_dir, capsys):
+    """Training runs on the 2M set, which has no per-pixel truth, so the run's own production
+    is never the one scored: the default is `EVAL_DATA`, and the run only lends its batch."""
+    assert main(["extract", str(run_dir), "--dry-run"]) == 0
+    out = capsys.readouterr().out
+    assert "shards_fhdh_sparse_200k_mixed_apa0W" in out and "/nowhere" not in out
+    assert "batch_size=8" in out
+
+
 def test_a_data_option_replaces_the_runs_production_but_not_its_batch(run_dir, capsys):
     """A run trained on a set without per-pixel truth is scored on one that has it; the
     per-rank batch, the seed and the charge transform still come from the run."""

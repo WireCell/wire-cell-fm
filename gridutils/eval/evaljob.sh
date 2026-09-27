@@ -103,7 +103,8 @@ fi
 
 echo "Syncing ${scratch_out} -> ${outdir}"
 mkdir -p "$outdir"
-rsync -a "${scratch_out}/" "${outdir}/" || { echo "FAILED: rsync"; rc=5; }
+# A `.tmp` block is half-written: a killed extract never got to delete it.
+rsync -a --exclude="*.tmp" "${scratch_out}/" "${outdir}/" || { echo "FAILED: rsync"; rc=5; }
 rsync -a "${wp_cache}/" "${wp_cache_gpfs}/" || true
 
 if [ "$rc" -ne 0 ]; then

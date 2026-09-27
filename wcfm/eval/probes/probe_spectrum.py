@@ -247,7 +247,13 @@ def run_one(store_root: Path, args) -> dict:
     # The class-separation section needs the per-pixel truth join, so it runs only on the final
     # map, which is the one tap guaranteed to be at full resolution.
     try:
-        fx = load_features(store_root, source=source, tap="out", verbose=False)
+        fx = load_features(
+            store_root,
+            source=source,
+            tap="out",
+            eval_set_root=args.eval_set_root,
+            verbose=False,
+        )
         if fx.has("pixel_labels") and fx.has_pool("pid_val"):
             sep = class_separation(fx.feat, fx.truth["pixel_labels"], fx.pool("pid_val"))
             entry["spectrum"]["class_separation"] = sep

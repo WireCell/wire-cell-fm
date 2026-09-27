@@ -1,12 +1,12 @@
-"""One pass over the eval set, every branch, written in the evaluation format.
+"""The eval set's truth, then every branch's features, written in the evaluation format.
 
-This is the step everything else in `wcfm/eval/` reads from. Four of its properties are what
+This is the step everything else in `wcfm/eval/` reads from. Five of its properties are what
 make the results comparable at all.
 
-The event cap is applied to events, never to batches. `max_images` caps the event count: the
-loop keeps its own tally and truncates the batch that crosses it, so on a fixed stream the first
-`max_images` events are the same set at any batch size. Capping batches instead makes
-`batch_size` silently change which events were scored.
+The event cap is applied to events, never to batches, when the set is built. `max_images` caps
+the event count: the truth pass keeps its own tally and truncates the batch that crosses it, so
+on a fixed stream the first `max_images` events are the same set at any batch size. Capping
+batches instead makes `batch_size` silently change which events were scored.
 
 That holds only while the cap binds. Both readers drop a short final batch -- the sharded one by
 construction, the map-style one by `drop_last`, which extraction turns off -- so an extraction
@@ -15,8 +15,20 @@ the batch size after all. `cap_bound` in the provenance records which of the two
 the caller is warned, because the alternative is finding out from a key-hash mismatch after a
 second GPU pass. Either way the set is pinned by `EvalSet`'s SHA-256 over its sorted event keys.
 
-Truth is written once. It does not depend on the checkpoint, so a second extraction against an
-existing eval set verifies the hash and writes only features.
+Truth is written once, before any feature. It does not depend on the checkpoint: the first
+extraction against an eval-set root reads the loader once without the model to write it, and
+every extraction then draws its pools from the stored set.
+
+The set, not the loader, decides which events are scored and where their rows go. The feature
+pass places each event by its key, skips events the set does not hold, and ends once it has seen
+every one. A multi-worker loader interleaves its workers batch by batch, so another batch size
+reads the events in another order and a slightly different first N: a positional join would pair
+features with another event's truth and raise nothing.
+
+Features are streamed. Pools are a function of truth and geometry alone, so `row_index` is known
+before the forward, and each batch writes only its rows of it straight into the on-disk block;
+event vectors are pooled batch by batch. Host memory is one batch plus the truth arrays, however
+large the row space: under `rows="pooled"` the instance pool alone can hold most pixels.
 
 Raw charge is captured before the transform. The probes score a raw floor against it and the
 model normalises in place, so reading it after the forward would read the normalised value under
@@ -47,7 +59,7 @@ import numpy as np
 
 from wcfm.data.voxels import voxels_from
 
-from .format import EvalSet, FeatureStore, Provenance, event_key_hash
+from .format import EvalSet, FeatureBlock, FeatureStore, Provenance, event_key_hash
 from .loading import checkpoint_sha256, inference_sources, inference_step, load_module
 from .pools import (
     DEFAULT_POOL_PER_CLASS,
@@ -80,6 +92,9 @@ EVENT_TRUTH: dict[str, tuple[str, Any]] = {
 #: The names event-level truth is written under, parallel to `EVENT_TRUTH`.
 EVENT_TRUTH_NAMES: tuple[str, ...] = tuple(name for name, _ in EVENT_TRUTH.values())
 
+#: The eval-set arrays that are geometry rather than truth.
+GEOMETRY: tuple[str, ...] = ("positions", "charges", "offsets")
+
 #: Re-exported from `pools`, where the rest of the draw constants live, because
 #: `wcfm/cli/eval.py` has imported it from here since the extract stage landed.
 
@@ -91,6 +106,11 @@ RAW_SOURCE = "raw"
 #: The name the final feature map is written under. Taps are named by the backbone; `out` is
 #: what `FeatureBundle.out` is called on disk, and no backbone may declare a tap by that name.
 OUT_TAP = "out"
+
+_NO_EVENTS = (
+    "the loader yielded no events, so there is nothing to extract. Check `data.backend` and "
+    "its path -- an empty shard directory reads as an empty dataset rather than as an error."
+)
 
 
 @dataclass
@@ -137,6 +157,9 @@ def extract(
     `sources` is what the caller wants. A branch the run does not have is dropped rather than
     raising, so `--sources=student,teacher` is a sensible default across a sweep in which some
     runs trained without a teacher. Asking for no available branch at all does raise.
+
+    `loader` is iterated twice when `eval_set_root` holds no set yet. Against an existing set it
+    must reach every event the set holds; its order and batch size are free.
     """
     import torch
 
@@ -159,39 +182,18 @@ def extract(
     if OUT_TAP in taps:
         raise ValueError(f"{OUT_TAP!r} is the name of the final feature map, not a tap")
 
-    acc = _Accumulator(sources=use, taps=taps)
-    started = time.perf_counter()
-    with torch.no_grad():
-        for batch in loader:
-            if 0 < max_images <= acc.n_events:
-                break
-            batch = batch.to(device)
-            room = max_images - acc.n_events if max_images > 0 else -1
-            acc.add(module, batch, room=room)
-            if progress and acc.n_batches % 20 == 0:
-                print(f"  {acc.n_events} events, {acc.n_pixels} pixels", flush=True)
-    elapsed = time.perf_counter() - started
-
-    cap_bound = max_images > 0 and acc.n_events >= max_images
-    if not cap_bound:
-        print(
-            f"  note: the loader ran out after {acc.n_events} events, so max_images="
-            f"{max_images} never bound. Both readers drop a short final batch, so this event "
-            "set depends on batch_size; an extraction at another batch size may not be "
-            "comparable to it. Lower max_images, or keep batch_size fixed across the sweep.",
-            flush=True,
-        )
-
-    truth, geometry, event_keys = acc.finish()
     eval_set = _eval_set(
-        eval_set_root,
-        eval_set_id=eval_set_id,
-        event_keys=event_keys,
-        truth=truth,
-        geometry=geometry,
+        eval_set_root, eval_set_id=eval_set_id, loader=loader, max_images=max_images
     )
-
-    n_pixels = int(geometry["offsets"][-1])
+    if 0 < max_images < eval_set.n_events:
+        raise ValueError(
+            f"eval set {eval_set.id!r} at {eval_set_root} holds {eval_set.n_events} events but "
+            f"max_images={max_images}; the set decides what is scored, so extract to a new "
+            "eval-set root to score fewer events"
+        )
+    truth, geometry = _read_eval_set(eval_set_root, eval_set)
+    offsets = np.asarray(geometry["offsets"], dtype=np.int64)
+    n_pixels = int(offsets[-1])
     # `pool_per_class` and `pool_seed` stay first-class arguments because they are the two a
     # caller actually varies and both are comparability axes; everything else a draw consumes
     # comes from `pool_spec`, whose defaults are the archived constants.
@@ -206,36 +208,56 @@ def extract(
         apa=apa,
         view=view,
     )
+    # The raw-charge baseline, pooled per event under the SAME sample the features use. It is
+    # feature-independent, so it is computed once per store from the set's geometry rather
+    # than per branch.
+    raw_means = None
+    if len(event_sample):
+        raw_means = mean_pool(
+            raw_charge_from(geometry["positions"], geometry["charges"], charge_transform_params),
+            event_sample,
+            offsets,
+            eval_set.n_events,
+        )
+    del truth, geometry
 
     store = FeatureStore(store_root)
-    # The raw-charge baseline, pooled per event under the SAME sample the features use. It is
-    # feature-independent, so it is written once per store rather than per branch -- but it
-    # must be pooled here: under `rows="pooled"` the pixels it averages are about to stop
-    # existing, and a probe recomputing it from the subset would pool a different population.
-    if len(event_sample):
-        store.write_event_means(
-            RAW_SOURCE,
-            OUT_TAP,
-            mean_pool(
-                raw_charge_from(
-                    geometry["positions"], geometry["charges"], charge_transform_params
-                ),
-                event_sample,
-                geometry["offsets"],
-                acc.n_events,
-            ),
+    acc = _FeaturePass(
+        module,
+        store,
+        sources=use,
+        taps=taps,
+        rows=rows,
+        event_keys=np.load(eval_set_root / "event_keys.npy"),
+        offsets=offsets,
+        row_index=row_index,
+        event_sample=event_sample,
+    )
+    started = time.perf_counter()
+    try:
+        with torch.no_grad():
+            _drive(acc, loader, device=device, progress=progress)
+        elapsed = time.perf_counter() - started
+        acc.finish()
+    except BaseException:
+        acc.abort()
+        raise
+
+    cap_bound = max_images > 0 and eval_set.n_events >= max_images
+    if not cap_bound:
+        print(
+            f"  note: the eval set holds {eval_set.n_events} events, so max_images="
+            f"{max_images} never bound. Both readers drop a short final batch, so this event "
+            "set depends on batch_size; an extraction at another batch size may not be "
+            "comparable to it. Lower max_images, or keep batch_size fixed across the sweep.",
+            flush=True,
         )
-    for source in use:
-        for tap, block in acc.blocks[source].items():
-            # Pool BEFORE subsetting: the event vectors are means over the sampled pixels of
-            # the whole eval set, and under `rows="pooled"` most of those rows are about to
-            # stop existing. Doing it in the other order would silently average whichever of
-            # them happened to survive into the union.
-            if len(event_sample) and _stride_of(acc, tap) == 1:
-                store.write_event_means(
-                    source, tap, mean_pool(block, event_sample, geometry["offsets"], acc.n_events)
-                )
-            store.write_features(source, tap, block[row_index] if rows == "pooled" else block)
+
+
+    if raw_means is not None:
+        store.write_event_means(RAW_SOURCE, OUT_TAP, raw_means)
+    for (source, tap), means in acc.event_means.items():
+        store.write_event_means(source, tap, means)
     for tap, coords in acc.tap_coords.items():
         store.write_coords(tap, coords)
     store.write_pools(row_index=row_index, **pools)
@@ -303,24 +325,26 @@ def extract(
     )
 
 
-# --------------------------------------------------------------------------- the pass
+# --------------------------------------------------------------------------- the passes
 
 
-class _Accumulator:
-    """Per-batch slices, kept as fp16 from the start.
+def _drive(acc, loader: Iterable, *, device=None, progress=False) -> None:
+    """Feed `loader` to a pass until it runs out or the pass is full."""
+    for batch in loader:
+        if acc.full:
+            break
+        if device is not None:
+            batch = batch.to(device)
+        acc.add(batch)
+        if progress and acc.n_batches % 20 == 0:
+            print(f"  {acc.n_events} events, {acc.n_pixels} pixels", flush=True)
 
-    The cast happens per batch rather than after the concatenate for the reason the old
-    extractor gives at `extract_features.py:230-236`: accumulating fp32 costs 2x and peaks at
-    5x while the list, the concatenated copy and the cast copy are all live -- 35 GB of
-    features alone at 10k events, against a 32 GB request.
-    """
 
-    def __init__(self, sources: Sequence[str], taps: Sequence[str]):
-        self.sources = list(sources)
-        self.taps = tuple(taps)
-        self.blocks: dict[str, dict[str, list]] = {s: {} for s in self.sources}
-        self.tap_strides: dict[str, int] = {}
-        self._tap_coords: dict[str, list] = {}
+class _TruthPass:
+    """Truth and geometry for a new eval set, read without the model, capped at `max_images`."""
+
+    def __init__(self, max_images: int = -1):
+        self.max_images = max_images
         self.event: dict[str, list] = {k: [] for k in EVENT_TRUTH}
         self.pixel: dict[str, list] = {}
         self.vertex: list = []
@@ -332,55 +356,22 @@ class _Accumulator:
         self.n_pixels = 0
         self.n_batches = 0
 
-    def add(self, module, batch, room: int = -1) -> None:
+    @property
+    def full(self) -> bool:
+        return 0 < self.max_images <= self.n_events
+
+    def add(self, batch) -> None:
         source_voxels = batch.voxels
         meta = batch.meta
-        b_total = len(source_voxels.offsets) - 1
-        take = b_total if room < 0 else min(room, b_total)
-
-        # BEFORE the forward: `inference_step` normalises in place, so the raw ADC
-        # this column is named for exists only until then -- and `.cpu()` on a tensor already
-        # on the CPU is a no-op that returns the SAME storage, so without the clone this reads
-        # back as log(q) under the name `charges`. A GPU run would have hidden that, since
-        # `.cpu()` does copy off the device: the column would have been right on the cluster
-        # and wrong in every CPU test, which is the wrong way round.
+        # Copied: `.cpu()` on a tensor already on the CPU returns the SAME storage, and a
+        # caller may pass a list of batches that the feature pass then normalises in place.
         raw_charge = source_voxels.feature_tensor[:, :1].detach().float().cpu().clone().numpy()
         in_coords = source_voxels.coordinate_tensor.detach().cpu().clone().numpy()
         in_offsets = source_voxels.offsets.detach().cpu().clone().numpy()
-
-        # And the model's in-place normalisation must not reach the caller's batch either.
-        # `extract` takes any iterable, so a caller may legitimately pass a list of batches and
-        # score two checkpoints over it; the second pass would otherwise see log(log(q)).
-        xs = voxels_from(
-            source_voxels.coordinate_tensor,
-            source_voxels.feature_tensor.clone(),
-            source_voxels.offsets,
-        )
-        bundles = inference_step(module, xs, self.sources, self.taps)
-
+        take = len(in_offsets) - 1
+        if self.max_images > 0:
+            take = min(take, self.max_images - self.n_events)
         keep_pixels = int(in_offsets[take])
-        expected: dict[int, list[int]] = {}  # stride -> per-event counts, shared by the branches
-        for source in self.sources:
-            bundle = bundles[source]
-            named = {OUT_TAP: bundle.out, **{t: bundle.taps[t] for t in self.taps}}
-            for tap, vox in named.items():
-                stride = self._stride(module, tap)
-                if stride > 1 and stride not in expected:
-                    expected[stride] = _strided_counts(xs, stride)
-                _check_alignment(source, tap, vox, xs, stride, expected.get(stride))
-                feats = vox.feature_tensor.detach().float().cpu().numpy()
-                if stride == 1:
-                    feats = feats[:keep_pixels]
-                else:
-                    # A strided conv drops trailing empty images from its offsets, so the tap
-                    # may describe fewer events than the input batch.
-                    last = min(take, len(vox.offsets) - 1)
-                    feats = feats[: int(vox.offsets[last])]
-                self.blocks[source].setdefault(tap, []).append(feats.astype(np.float16))
-                if stride > 1 and source == self.sources[0]:
-                    coords = vox.coordinate_tensor.detach().cpu().numpy()
-                    last = min(take, len(vox.offsets) - 1)
-                    self._tap_coords.setdefault(tap, []).append(coords[: int(vox.offsets[last])])
 
         self.positions.append(in_coords[:keep_pixels])
         self.charges.append(raw_charge[:keep_pixels, 0])
@@ -403,29 +394,9 @@ class _Accumulator:
         self.n_pixels += keep_pixels
         self.n_batches += 1
 
-    def _stride(self, module, tap: str) -> int:
-        if tap in self.tap_strides:
-            return self.tap_strides[tap]
-        stride = 1 if tap == OUT_TAP else int(_tap_stride(module, tap))
-        self.tap_strides[tap] = stride
-        return stride
-
-    @property
-    def tap_coords(self) -> dict[str, np.ndarray]:
-        return {t: np.concatenate(v, axis=0) for t, v in self._tap_coords.items()}
-
     def finish(self):
         if not self.n_events:
-            raise ValueError(
-                "the loader yielded no events, so there is nothing to extract. Check "
-                "`data.backend` and its path -- an empty shard directory reads as an empty "
-                "dataset rather than as an error."
-            )
-        for source in self.sources:
-            self.blocks[source] = {
-                tap: np.concatenate(parts, axis=0)
-                for tap, parts in self.blocks[source].items()
-            }
+            raise ValueError(_NO_EVENTS)
         offsets = np.zeros(len(self.counts) + 1, dtype=np.int64)
         np.cumsum(self.counts, out=offsets[1:])
 
@@ -447,6 +418,195 @@ class _Accumulator:
         keys = np.asarray(self.event_keys)
         _check_columns(truth, geometry, keys, n_events=self.n_events, n_pixels=self.n_pixels)
         return truth, geometry, keys
+
+
+class _FeaturePass:
+    """Each branch's features, written event by event into the store at the set's positions.
+
+    An event is found by its key in the set's `event_keys` and checked against the set's pixel
+    count. A stride-1 tap writes the event's rows of `row_index` to their positions in the block
+    `FeatureStore.open_features` opened, so the finished block is `full_block[row_index]` in the
+    set's order whatever order the loader read. Its event vectors are `mean_pool` over the batch:
+    an event never spans two batches, and each event's sample is visited in its stored order, so
+    each sum is the one pooling the whole block would compute. Features are cast to fp16 before
+    either, which is the precision the block is stored at.
+
+    A strided tap's rows are not pixels, so it is held per event and written at `finish`.
+    """
+
+    def __init__(
+        self,
+        module,
+        store: FeatureStore,
+        *,
+        sources: Sequence[str],
+        taps: Sequence[str],
+        rows: str,
+        event_keys: np.ndarray,
+        offsets: np.ndarray,
+        row_index: np.ndarray,
+        event_sample: np.ndarray,
+    ):
+        self.module = module
+        self.store = store
+        self.sources = list(sources)
+        self.taps = tuple(taps)
+        self.rows = rows
+        self.index = {str(k): i for i, k in enumerate(event_keys)}
+        self.seen = np.zeros(len(event_keys), dtype=bool)
+        self.offsets = offsets
+        self.row_index = row_index
+        self.event_sample = event_sample
+        n_events = len(offsets) - 1
+        # `_event_sample` visits events in order, so the sample is grouped by event and
+        # `sample_ptr[e]:sample_ptr[e + 1]` is event e's slice of it.
+        ev_of = np.searchsorted(offsets, event_sample, side="right") - 1
+        if np.any(np.diff(ev_of) < 0):
+            raise ValueError("the event sample is not grouped by event")
+        self.sample_ptr = np.searchsorted(ev_of, np.arange(n_events + 1))
+        self.row_ptr = np.searchsorted(row_index, offsets)
+        self.blocks: dict[tuple[str, str], FeatureBlock] = {}
+        self.event_means: dict[tuple[str, str], np.ndarray] = {}
+        self.strided: dict[tuple[str, str], dict[int, np.ndarray]] = {}
+        self.tap_strides: dict[str, int] = {}
+        self._tap_coords: dict[str, dict[int, np.ndarray]] = {}
+        self.n_events = 0
+        self.n_pixels = 0
+        self.n_batches = 0
+
+    @property
+    def full(self) -> bool:
+        return bool(self.seen.all())
+
+    def add(self, batch) -> None:
+        source_voxels = batch.voxels
+        in_offsets = source_voxels.offsets.detach().cpu().numpy()
+        self.n_batches += 1
+
+        local, where = [], []  # batch event b -> set event e, for the events the set holds
+        for b, key in enumerate(str(k) for k in batch.meta["event_key"]):
+            e = self.index.get(key)
+            if e is None:
+                continue
+            if self.seen[e]:
+                raise ValueError(f"event {key!r} appeared twice in the loader")
+            here = int(in_offsets[b + 1] - in_offsets[b])
+            there = int(self.offsets[e + 1] - self.offsets[e])
+            if here != there:
+                raise ValueError(
+                    f"the eval set was built from different events than this pass read: event "
+                    f"{key!r} has {here} pixels here and {there} in the set. Extract to a new "
+                    "eval-set root, or check that the loader reads the set's data."
+                )
+            local.append(b)
+            where.append(e)
+        if not local:
+            return
+
+        # The model's in-place normalisation must not reach the caller's batch. `extract`
+        # takes any iterable, so a caller may legitimately pass a list of batches and score two
+        # checkpoints over it; the second pass would otherwise see log(log(q)).
+        xs = voxels_from(
+            source_voxels.coordinate_tensor,
+            source_voxels.feature_tensor.clone(),
+            source_voxels.offsets,
+        )
+        bundles = inference_step(self.module, xs, self.sources, self.taps)
+
+        # Per kept event: the block row its rows start at, and their batch positions; and the
+        # batch positions of its sample, grouped by event in `local` order.
+        placed, sample = [], []
+        for b, e in zip(local, where, strict=True):
+            shift = int(in_offsets[b]) - int(self.offsets[e])
+            lo, hi = self.row_ptr[e], self.row_ptr[e + 1]
+            placed.append((int(lo), self.row_index[lo:hi] + shift))
+            sample.append(self.event_sample[self.sample_ptr[e] : self.sample_ptr[e + 1]] + shift)
+        sample = np.concatenate(sample)
+        n_batch = len(in_offsets) - 1
+
+        expected: dict[int, list[int]] = {}  # stride -> per-event counts, shared by the branches
+        for source in self.sources:
+            bundle = bundles[source]
+            named = {OUT_TAP: bundle.out, **{t: bundle.taps[t] for t in self.taps}}
+            for tap, vox in named.items():
+                stride = self._stride(tap)
+                if stride > 1 and stride not in expected:
+                    expected[stride] = _strided_counts(xs, stride)
+                _check_alignment(source, tap, vox, xs, stride, expected.get(stride))
+                feats = vox.feature_tensor.detach().float().cpu().numpy()
+                if stride == 1:
+                    feats = feats.astype(np.float16)
+                    self._write(source, tap, feats, placed)
+                    if len(self.event_sample):
+                        means = self.event_means.setdefault(
+                            (source, tap),
+                            np.full((len(self.offsets) - 1, feats.shape[1]), np.nan, np.float32),
+                        )
+                        pooled = mean_pool(feats, sample, in_offsets, n_batch)
+                        means[where] = pooled[local]
+                    continue
+                # A strided conv drops trailing empty images from its offsets, so the tap may
+                # describe fewer events than the input batch.
+                tap_offsets = vox.offsets.detach().cpu().numpy()
+                coords = vox.coordinate_tensor.detach().cpu().numpy()
+                for b, e in zip(local, where, strict=True):
+                    lo = int(tap_offsets[min(b, len(tap_offsets) - 1)])
+                    hi = int(tap_offsets[min(b + 1, len(tap_offsets) - 1)])
+                    part = self.strided.setdefault((source, tap), {})
+                    part[e] = feats[lo:hi].astype(np.float16)
+                    if source == self.sources[0]:
+                        self._tap_coords.setdefault(tap, {})[e] = coords[lo:hi]
+
+        self.seen[where] = True
+        self.n_events += len(local)
+        self.n_pixels += int(sum(in_offsets[b + 1] - in_offsets[b] for b in local))
+
+    def _write(self, source: str, tap: str, feats: np.ndarray, placed: list) -> None:
+        key = (source, tap)
+        if key not in self.blocks:
+            self.blocks[key] = self.store.open_features(
+                source, tap, len(self.row_index), feats.shape[1]
+            )
+        for start, src in placed:
+            self.blocks[key].write(start, feats[src])
+
+    def _stride(self, tap: str) -> int:
+        if tap in self.tap_strides:
+            return self.tap_strides[tap]
+        stride = 1 if tap == OUT_TAP else int(_tap_stride(self.module, tap))
+        self.tap_strides[tap] = stride
+        return stride
+
+    @property
+    def tap_coords(self) -> dict[str, np.ndarray]:
+        return {t: np.concatenate([v[e] for e in sorted(v)]) for t, v in self._tap_coords.items()}
+
+    def abort(self) -> None:
+        """Delete the half-filled blocks, which are allocated at full size."""
+        for block in self.blocks.values():
+            block.discard()
+        self.blocks.clear()
+
+    def finish(self) -> None:
+        """Refuse a pass that missed any of the set's events, then commit every block."""
+        if not self.n_events and not self.n_batches:
+            raise ValueError(_NO_EVENTS)
+        if not self.seen.all():
+            missing = np.flatnonzero(~self.seen)
+            raise ValueError(
+                f"the eval set was built from different events than this pass read: "
+                f"{len(missing)} of its {len(self.seen)} events never appeared (set positions "
+                f"{missing[:5].tolist()}...). Results already written against the set were "
+                "scored on its events -- extract to a new eval-set root, or check that the "
+                "loader reads the set's data."
+            )
+        for block in self.blocks.values():
+            block.commit()
+        for (source, tap), parts in self.strided.items():
+            block = np.concatenate([parts[e] for e in sorted(parts)], axis=0)
+            self.store.write_features(
+                source, tap, block[self.row_index] if self.rows == "pooled" else block
+            )
 
 
 def _check_columns(truth, geometry, keys, *, n_events: int, n_pixels: int) -> None:
@@ -547,33 +707,31 @@ def _check_alignment(source: str, tap: str, vox, xs, stride: int, expected=None)
 # ------------------------------------------------------------------------ eval set, pools
 
 
-def _eval_set(root: Path, *, eval_set_id: str, event_keys, truth, geometry) -> EvalSet:
-    """Create the set, or verify an existing one describes these very events.
+def _eval_set(root: Path, *, eval_set_id: str, loader: Iterable, max_images: int) -> EvalSet:
+    """The set at `root`, or a new one written from a truth-only pass over `loader`.
 
     Truth does not depend on the checkpoint, so the second checkpoint scored against a set
-    writes no truth at all -- it checks that the events it just read are the ones the set was
-    built from and moves on. A mismatch is an error here rather than a silent overwrite: the
-    results already sitting beside that set were scored on the old events.
+    writes no truth at all; the feature pass proves it read every event the set holds.
     """
-    keys = np.asarray(event_keys)
-    default_id = eval_set_id or f"n{len(keys)}-{event_key_hash(keys)[:12]}"
     if (root / "eval_set.json").exists():
-        existing = EvalSet.load(root)
-        if existing.key_hash != event_key_hash(keys):
-            raise ValueError(
-                f"eval set {existing.id!r} at {root} was built from different events than this "
-                f"pass read ({existing.n_events} vs {len(keys)}). Results already written "
-                "against it were scored on the old set, so this is refused rather than "
-                "overwritten -- extract to a new eval-set root, or delete this one knowingly."
-            )
-        return existing
+        return EvalSet.load(root)
+    acc = _TruthPass(max_images)
+    _drive(acc, loader)
+    truth, geometry, keys = acc.finish()
     return EvalSet.create(
         root,
-        id=default_id,
+        id=eval_set_id or f"n{len(keys)}-{event_key_hash(keys)[:12]}",
         event_keys=keys,
         truth=truth,
         geometry=geometry,
     )
+
+
+def _read_eval_set(root: Path, eval_set: EvalSet) -> tuple[dict, dict]:
+    """The set's truth and geometry columns, memory-mapped."""
+    arrays = {name: np.asarray(eval_set.read(root, name)) for name in eval_set.truth_arrays}
+    geometry = {name: arrays.pop(name) for name in GEOMETRY if name in arrays}
+    return arrays, geometry
 
 
 def _draw_pools(*, truth, geometry, rows: str, spec: PoolSpec, apa: int, view: str):
@@ -632,16 +790,6 @@ def _draw_pools(*, truth, geometry, rows: str, spec: PoolSpec, apa: int, view: s
 
 
 # ------------------------------------------------------------------------------- helpers
-
-
-def _stride_of(acc, tap: str) -> int:
-    """The stride extraction recorded for a written tap. `OUT_TAP` is always full resolution.
-
-    Per-event means are pooled against the eval set's own `offsets`, which count *pixels*, so
-    a strided tap's rows do not line up with them and it gets no event vectors rather than a
-    silently misaligned set.
-    """
-    return 1 if tap == OUT_TAP else int(acc.tap_strides.get(tap, 1))
 
 
 def _tap_stride(module, tap: str) -> int:

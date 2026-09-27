@@ -10,6 +10,8 @@
 #   $3 store    -- ONE checkpoint's feature store: <run>/features/epoch<N>
 #   $4 outdir   -- where the probe JSONs go (one directory per RUN, not per epoch)
 #   $5 stages   -- comma-separated stage list
+#   $6 eval_set -- the eval set the store was extracted against; a store extracted with
+#                  `--eval-set-root` outside the run cannot find its truth without it
 #
 # NB: this file is a COPY, staged beside the archive at submit time, and Condor transfers it
 # here like any other input. Editing the checkout's copy cannot reach a queued or running job.
@@ -37,11 +39,13 @@ pyenv=$2
 store=$3
 outdir=$4
 stages=$5
+eval_set=$6
 
 echo "Running ${CLUSTER_ID:-?}.${JOB_ID:-?} on $(hostname)"
 echo "  store=${store}"
 echo "  outdir=${outdir}"
 echo "  stages=${stages}"
+echo "  eval_set=${eval_set}"
 echo ""
 
 export PYTHONUNBUFFERED=1
@@ -75,7 +79,8 @@ fi
 # over), so there is nothing for a sync step to protect against and a job killed mid-suite
 # leaves every completed stage behind rather than none of them.
 mkdir -p "${outdir}"
-python -u -m wcfm.cli eval probe "${store}" --stages="${stages}" --out-dir="${outdir}" --device=cpu
+python -u -m wcfm.cli eval probe "${store}" --stages="${stages}" --out-dir="${outdir}" \
+  --eval-set-root="${eval_set}" --device=cpu
 rc=$?
 
 n_json=$(find "${outdir}" -name '*.json' 2>/dev/null | wc -l)

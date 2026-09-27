@@ -211,7 +211,9 @@ def _per_type(pid_va: np.ndarray, yva: np.ndarray, pred: np.ndarray) -> dict:
 
 
 def run_one(store_root: Path, args) -> dict:
-    fx = load_features(store_root, source=args.source, tap=args.tap)
+    fx = load_features(
+        store_root, source=args.source, tap=args.tap, eval_set_root=args.eval_set_root
+    )
     fx.require("pixel_labels", "pixel_energyfrac")
     print(f"\n=== {run_label(store_root, args.source)} ===")
 

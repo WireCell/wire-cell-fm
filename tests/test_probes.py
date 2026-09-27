@@ -180,6 +180,7 @@ class _Args:
         self.tap = "out"
         self.seed = 0
         self.device = "cpu"
+        self.eval_set_root = None
         self.__dict__.update(kw)
 
 
@@ -550,6 +551,27 @@ def test_probe_then_merge_through_the_cli(store, tmp_path, capsys):
     table = capsys.readouterr().out
     assert "pid_mlp" in table and "run_a:ep7:student" in table
     assert "pr" in table  # the spectrum columns merged in alongside
+
+
+def test_every_stage_reads_an_eval_set_that_lives_outside_the_run(store, tmp_path, capsys):
+    """`wcfm eval submit --eval-set-root` shares one set across runs, so the store's sibling
+    `eval_set` does not exist and every stage has to be told where the set is."""
+    import shutil
+
+    from wcfm.cli.eval import main
+    from wcfm.eval.probes.runner import DEFAULT_STAGES
+
+    shared = tmp_path / "other_run" / "features" / "eval_set"
+    shared.parent.mkdir(parents=True)
+    shutil.move(str(store.parent / "eval_set"), shared)
+    out_dir = tmp_path / "probes"
+
+    base = ["probe", str(store), f"--stages={DEFAULT_STAGES}", f"--out-dir={out_dir}"]
+    assert main(base) == 1, "without the flag the default path is missing"
+    capsys.readouterr()
+    assert main([*base, f"--eval-set-root={shared}"]) == 0
+    assert "FAILED stages" not in capsys.readouterr().out
+    assert len(list(out_dir.glob("*_ep7.json"))) == len(DEFAULT_STAGES.split(","))
 
 
 def test_a_failing_stage_does_not_cost_the_others(store, tmp_path, capsys):

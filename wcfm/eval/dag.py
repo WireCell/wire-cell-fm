@@ -246,6 +246,7 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
                     str(store),
                     str(plan.run_dir / "probes"),
                     plan.stages,
+                    str(plan.eval_set_root),
                 ]
             ),
             log_dir=log_dir,
@@ -263,9 +264,12 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
             f"JOB {ex_name} {dag_dir / f'{ex_name}.sub'}",
             f"JOB {pr_name} {dag_dir / f'{pr_name}.sub'}",
             f"PARENT {ex_name} CHILD {pr_name}",
-            # The PRE script skips an extraction whose provenance already records this
-            # checkpoint's hash. Exit 1 from a PRE script means "do not run the node".
+            # The PRE script exits 1 for an extraction whose provenance already records this
+            # checkpoint's hash. On its own a non-zero PRE fails the node and burns its
+            # retries; `PRE_SKIP` is what makes that exit code "skip the job, mark the node
+            # done", so the probes below it still run.
             f"SCRIPT PRE {ex_name} {dag_dir / 'stale.sh'} {ckpt} {store}",
+            f"PRE_SKIP {ex_name} 1",
             f"RETRY {ex_name} {plan.retry}",
             f"RETRY {pr_name} {plan.retry}",
             "",
@@ -304,7 +308,7 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
     return out
 
 
-#: PRE script. Exit 1 tells DAGMan to skip the node.
+#: PRE script. Exit 1 is the code the DAG's `PRE_SKIP` line turns into "skip this node".
 _STALE_SH = """#!/bin/bash
 #
 # Skip an extraction that is already current. Written by `wcfm eval submit`.
@@ -315,7 +319,7 @@ _STALE_SH = """#!/bin/bash
 # bytes, and by nothing else. Comparing modification times is defeated by a re-run against an
 # unchanged checkpoint, and waiting for a file to stop growing is defeated by a slow GPFS write.
 #
-# Exit 1 = do not run the node (DAGMan treats a non-zero PRE as a skip we have asked for).
+# Exit 1 = do not run the node: eval.dag declares PRE_SKIP for this exit code.
 set -u
 ckpt=$1
 store=$2

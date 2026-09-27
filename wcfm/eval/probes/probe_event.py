@@ -117,7 +117,9 @@ def knn_curve(F: np.ndarray, y: np.ndarray, n_classes: int, ks=KS, device: str =
 
 
 def run_one(store_root: Path, args) -> dict:
-    fx = load_features(store_root, source=args.source, tap=args.tap)
+    fx = load_features(
+        store_root, source=args.source, tap=args.tap, eval_set_root=args.eval_set_root
+    )
     print(f"\n=== {run_label(store_root, args.source)} ===")
 
     # Both sides were pooled over the SAME sampled pixels at extraction time, so the comparison
