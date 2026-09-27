@@ -337,14 +337,13 @@ def cnms(
     reordered retained-first, in ascending index order within each half, and the retained count
     per event.
 
-    The greedy pass runs in rounds instead of one candidate at a time: a round retains every
-    unresolved candidate that no unresolved candidate of higher count can still suppress, then
-    suppresses their balls. The retained set equals the sequential visit's, and the number of
-    rounds is the depth of the suppression chain rather than the number of centres.
-    `tests/test_model_polarmae_ops.py` pins the equality against a sequential reference. The
-    retained set is what PoLAr-MAE's compiled kernel produces under a stable candidate order;
-    that kernel's own caller sorts the counts unstably, and most counts tie, so its set is not
-    reproducible even between its CPU and GPU.
+    On CUDA the greedy pass is `cnms_kernel.greedy_retain`, one candidate at a time per event;
+    elsewhere it is `_greedy_rounds`. Both return the sequential visit's set:
+    `tests/test_model_polarmae_ops.py` pins the rounds against a sequential reference and
+    `tests/test_model_polarmae_gpu.py` pins the kernel against the rounds. The retained set is
+    what PoLAr-MAE's compiled kernel produces under a stable candidate order; that kernel's own
+    caller sorts the counts unstably, and most counts tie, so its set is not reproducible even
+    between its CPU and GPU.
     """
     B, P, D = centroids.shape
     device = centroids.device
@@ -369,8 +368,27 @@ def cnms(
     # has at most 81 sites, so with `K=256` the two scatter passes of every round would
     # otherwise run over three times the entries that carry anything.
     idx = idx[..., : max(int(counts.max()), 1)]
-    K = idx.shape[-1]
     _, order = counts.sort(dim=-1, descending=True, stable=True)
+    if centroids.is_cuda:
+        from .cnms_kernel import greedy_retain
+
+        retain = greedy_retain(order, idx, lengths)
+    else:
+        retain = _greedy_rounds(order, idx, lengths)
+
+    reorder = torch.argsort((~retain).to(torch.int8), dim=1, stable=True)
+    centroids = centroids.gather(1, reorder.unsqueeze(-1).expand(-1, -1, D))
+    return centroids, retain.sum(dim=1)
+
+
+def _greedy_rounds(order: Tensor, idx: Tensor, lengths: Tensor) -> Tensor:
+    """`cnms`'s greedy pass in rounds instead of one candidate at a time: a round retains every
+    unresolved candidate that no unresolved candidate earlier in `order` can still suppress,
+    then suppresses their balls. The number of rounds is the depth of the suppression chain
+    rather than the number of centres, and every round is two scatters over the whole
+    `(B, P, K)` neighbour list, so its cost grows with the longest chain in the batch."""
+    B, P, K = idx.shape
+    device = idx.device
     rank = torch.empty_like(order)
     rank.scatter_(1, order, torch.arange(P, device=device).expand(B, P))
     rank = rank.to(torch.int32)
@@ -395,10 +413,7 @@ def cnms(
         hit = torch.full((B, P), int(none), dtype=torch.int32, device=device)
         hit.scatter_reduce_(1, idx0, edge.reshape(B, P * K), reduce="amin")
         unresolved &= ~(now | (hit < rank))
-
-    reorder = torch.argsort((~retain).to(torch.int8), dim=1, stable=True)
-    centroids = centroids.gather(1, reorder.unsqueeze(-1).expand(-1, -1, D))
-    return centroids, retain.sum(dim=1)
+    return retain
 
 
 def chamfer_distance(x: Tensor, y: Tensor, x_lengths: Tensor, y_lengths: Tensor) -> Tensor:

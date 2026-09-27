@@ -1,0 +1,30 @@
+# @package _global_
+#
+# Distillation from `wcfm_polarmae_200k_b80k` epoch 6 into the `kd` student (MinkUNet with the
+# attention bottleneck), on the default training set: two ranks at per-rank batch 20 (global
+# 40), 5 epochs of 5,000 steps. 10 readers (2 ranks x 5 workers) split the 50 shards exactly;
+# a rank count whose reader count does not divide 50 pads every epoch with repeated shards.
+#
+#   env WCFM_PYENV=<venv> WCFM_REQUEST_CPUS=10 wcfm submit +experiment=kd_polarmae
+
+defaults:
+  - override /model: kd
+  - _self_
+
+run:
+  name: wcfm_kd_polarmae
+  save_every: 1
+
+launch:
+  devices: 2
+
+data:
+  global_batch_size: 40   # per-rank 20 on two ranks
+
+model:
+  terms:
+    distill:
+      checkpoint: /gpfs01/lbne/users/fm/mvicenzi/CONDOR_OUT/wcfm_polarmae_200k_b80k/checkpoints/checkpoint_epoch6.pt
+
+optim:
+  epochs: 5

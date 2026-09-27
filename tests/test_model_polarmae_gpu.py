@@ -25,6 +25,7 @@ from wcfm.model.modules.ssl import _inference_context  # noqa: E402
 from wcfm.model.terms import ChamferTerm, EnergyTerm  # noqa: E402
 
 from .fake_backbone import make_batch  # noqa: E402
+from .test_model_polarmae_ops import cloud, sequential_cnms  # noqa: E402
 
 pytestmark = pytest.mark.gpu
 
@@ -186,3 +187,37 @@ def test_step_cost_on_production_events(device, capsys):
     )
     with capsys.disabled():
         print("\n[polarmae] " + "\n[polarmae] ".join(lines))
+
+
+@pytest.mark.parametrize("seed,K,radius", [(5, 64, 0.08), (6, 4, 0.15), (7, 200, 0.3)])
+def test_the_cnms_kernel_retains_the_sequential_set(device, seed, K, radius):
+    """`cnms_kernel.greedy_retain` against the sequential reference, on the clouds the CPU
+    suite pins the rounds with, a truncated neighbour list included."""
+    from wcfm.model.backbones.polarmae.ops import cnms
+
+    pts, lengths = cloud(B=4, P=80, seed=seed, lengths=(80, 55, 12, 0))
+    centres, n = cnms(pts.to(device), radius=radius, overlap_factor=0.6, K=K, lengths=lengths)
+    ref = sequential_cnms(pts, radius, 0.6, K, lengths)
+    assert n.cpu().tolist() == ref.sum(1).tolist()
+    for b in range(4):
+        assert torch.equal(centres[b, : n[b]].cpu(), pts[b][ref[b]])
+
+
+@pytest.mark.needs_data
+@pytest.mark.parametrize("overlap", [0.5, 0.72])
+def test_the_cnms_kernel_matches_the_rounds_on_production_events(device, overlap):
+    """The CUDA path and the CPU rounds retain the same centres, in the same order, on real
+    events through the grid query, at the training overlap and at the export one."""
+    from wcfm.model.backbones.polarmae.ops import cnms
+
+    bb = PolarMAEBackbone().to(device)
+    points, lengths, _ = bb.points_from(production_batch(4, device).voxels)
+    xyz = points[..., :3].float()
+    r = bb.grouping.group_radius
+    kw = dict(radius=r, overlap_factor=overlap, K=256, pitch=bb.grouping.pitch)
+    with torch.no_grad():
+        gpu = cnms(xyz, lengths=lengths, **kw)
+        cpu = cnms(xyz.cpu(), lengths=lengths.cpu(), **kw)
+    assert torch.equal(gpu[1].cpu(), cpu[1])
+    assert torch.equal(gpu[0].cpu(), cpu[0])
+    assert int(gpu[1].min()) > 0
