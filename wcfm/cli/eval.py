@@ -53,6 +53,7 @@ submit options:
   --max-images=N        cap on EVENTS            (default: 10000)
   --eval-set-root=P     share an eval set across runs
   --data=NAME           forwarded to every extract node (see extract options)
+  --batch-size=N        forwarded to every extract node (see extract options)
   --retry=N             Condor RETRY per node    (default: 2)
   --maxjobs=N           extract nodes to run at once (default: unthrottled). Each holds every
                         pixel's features in host RAM and doubles that concatenating them, so a
@@ -552,7 +553,7 @@ def _submit(argv: list[str]) -> int:
         rows=flags.get("rows", "all"),
         max_images=int(flags.get("max-images", 10000)),
         retry=int(flags.get("retry", 2)),
-        extract_flags=(f"--data={flags['data']}",) if "data" in flags else (),
+        extract_flags=tuple(f"--{k}={flags[k]}" for k in ("data", "batch-size") if k in flags),
     )
 
     files = build_dag(plan)

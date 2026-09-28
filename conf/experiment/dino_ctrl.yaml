@@ -1,0 +1,46 @@
+# @package _global_
+#
+# Plain DINO, the control for the augmentation variations: `hybrid_ddp6_eb600`'s recipe with
+# `model=dino`, so the removed pixels are absent rather than predicted and the loss falls on
+# the pixels a student view and the teacher's global crop both hold. Two ranks at per-rank
+# 100, so the learning rate is a third of the six-rank run's, and 50 epochs, since that run's
+# probes plateaued by epoch 40.
+#
+#   env WCFM_REQUEST_MEMORY=40000 WCFM_REQUEST_CPUS=10 wcfm submit +experiment=dino_ctrl
+#
+# The three variations inherit this file and change the augment block alone:
+# `dino_fullteacher`, `dino_multicrop`, `dino_croponly`. Everything not set below is a schema
+# default.
+
+defaults:
+  - override /model: dino
+  - override /launch: multi_2gpu
+  - _self_
+
+run:
+  name: wcfm_dino2M_ctrl
+  precision: 32-true
+  save_every: 10
+
+data:
+  global_batch_size: 200   # per-rank 100 on two ranks
+
+optim:
+  epochs: 50
+  lr: 2.0e-4
+  min_lr: 2.0e-6
+  weight_decay: 0.04
+  weight_decay_end: 0.1
+  warmup_epochs: 10
+
+model:
+  backbone:
+    encoding_range: 320.0
+  teacher:
+    momentum_start: 0.999
+    momentum_end: 0.9999
+  augment:
+    cropper:
+      n_global: 1
+      n_local: 2
+      global_scale: [0.4, 0.8]

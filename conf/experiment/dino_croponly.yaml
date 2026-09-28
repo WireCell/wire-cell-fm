@@ -1,0 +1,11 @@
+# @package _global_
+#
+# `dino_ctrl` without the block mask: the student views are clean crops.
+
+defaults:
+  - dino_ctrl
+  - override /model/augment: crop_only
+  - _self_
+
+run:
+  name: wcfm_dino2M_croponly

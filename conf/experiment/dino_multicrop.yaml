@@ -1,0 +1,26 @@
+# @package _global_
+#
+# `dino_ctrl` with the canonical multi-crop: two global views, so each global pairs with the
+# other's teacher encoding and the student sees wide-field targets, and four local views.
+#
+# Five ranks at per-rank 40, the same global batch of 200: at per-rank 100 the six views
+# exceed a 40 GB GPU (CUDA OOM around step 16,000). Five ranks x 5 workers are 25 readers,
+# which split the 50 shards evenly; four ranks would pad every epoch with repeated shards.
+#
+#   env WCFM_REQUEST_MEMORY=40000 WCFM_REQUEST_CPUS=25 wcfm submit +experiment=dino_multicrop
+
+defaults:
+  - dino_ctrl
+  - _self_
+
+launch:
+  devices: 5
+
+run:
+  name: wcfm_dino2M_multicrop
+
+model:
+  augment:
+    cropper:
+      n_global: 2
+      n_local: 4

@@ -4,6 +4,11 @@
 # training set, 100 epochs: six ranks,
 # per-rank batch 100, lr 6e-4. Metrics are the full collector set bar two, disabled below.
 #
+# The reference run of this recipe, `wcfm_hybrid_ddp6_eb600`, trained on
+# `prod_jay_200k_mixed_sharded`, the evaluation production, so its probe tables are in-sample.
+# This preset trains on the default set under its own name; never point `run.name` back at
+# that directory: it holds the shared eval set, and a submit under its name resumes it.
+#
 #   WCFM_REQUEST_MEMORY=64000 WCFM_REQUEST_CPUS=24 \
 #     wcfm submit +experiment=hybrid_ddp6_eb600
 #
@@ -22,7 +27,7 @@ defaults:
   - _self_
 
 run:
-  name: wcfm_hybrid_ddp6_eb600
+  name: wcfm_hybrid2M_ddp6_eb600
   precision: 32-true
   num_workers: 4        # the sharded reader partitions over world_size x num_workers; 6 x 4
                         # matches the 24 CPUs the job asks for

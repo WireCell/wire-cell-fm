@@ -284,15 +284,10 @@ def test_preset_files_declare_package_global_and_subgroups_do_not():
 def test_every_experiment_composes(hydra_all, experiment):
     """Every file in `conf/experiment/` must actually load.
 
-    `hybrid_baseline_mixed_b100_pefix` did not, from the day it was committed until
-    2026-09-10: its defaults said `- /model: hybrid` where `model` is already a group in
-    `conf/config.yaml`, so Hydra refused with "Multiple values for model" and the fix was the
-    word `override`. Nothing caught it because nothing composed it -- the presets were tested,
-    the experiments were not, and this one is the comparison target for the whole old-vs-new
-    framework question, so its first real use would have been the run that mattered.
-
-    A composition failure is the cheapest bug in this repo to find and among the most annoying
-    to hit, because it lands after the queue.
+    A defaults entry `- /model: hybrid` where `model` is already a group in `conf/config.yaml`
+    fails with "Multiple values for model"; the preset needs `override`. A composition failure
+    is the cheapest bug in this repo to find and among the most annoying to hit, because it
+    lands after the queue.
     """
     cfg = compose(config_name="config", overrides=[f"+experiment={experiment}"])
     assert cfg.model is not None and cfg.data is not None

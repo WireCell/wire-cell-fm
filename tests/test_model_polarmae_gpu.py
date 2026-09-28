@@ -125,7 +125,7 @@ def _timed(fn, reps: int = 3) -> float:
 def test_step_cost_on_production_events(device, capsys):
     """Not an assertion on speed: the per-rank step on 16 real events, printed. The grouping
     is timed with the dense and the grid query, then one training step with backward under
-    bf16 autocast, which is what a rank of `polarmae_pm4w_ddp6` does."""
+    bf16 autocast, which is what a rank of `polarmae_long` does."""
     torch.manual_seed(0)
     batch = production_batch(16, device)
     m = PointMaeModule(

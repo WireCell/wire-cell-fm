@@ -55,6 +55,38 @@ Consequences to hold in mind when changing either side:
   a view over the streams that no job writes or syncs.
 - Check a composition before spending a queue slot: `wcfm train --dry-run <overrides>`.
 
+## Objectives and their presets
+
+Four objectives are nominal. Each has a final recipe in `conf/experiment/`, and a new run starts
+from one of these, not from a `model=` preset alone:
+
+- `polarmae`, PoLAr-MAE trained on its own: a point-cloud MAE on `pointmae` (chamfer and energy
+  terms over hidden token groups; no crop, mask or teacher). Short run `polarmae_short`
+  (2 ranks x 8, lr 7e-5, 6 epochs, bf16). Long run `polarmae_long` (4 ranks x 16, lr 3.5e-5,
+  42 epochs): it degrades from step ~60,000, so score `checkpoint_epoch15.pt` and earlier.
+- `kd`, a PoLAr-MAE checkpoint distilled into the MinkUNet `attn_mae` backbone: `kd_polarmae`
+  (whole image in, cosine to the frozen teacher's per-voxel features, 32-true). The teacher is a
+  wcfm checkpoint (`model.terms.distill.checkpoint`), never a foreign package.
+- `dino`, per-pixel DINO against an EMA teacher, removed pixels absent: `dino_ctrl` and its three
+  augmentation arms `dino_fullteacher`, `dino_multicrop`, `dino_croponly`.
+- `hybrid`, DINO whose masked pixels are reinjected as `masked` tokens and scored by the same
+  cross-entropy (`score_injected: true`); no occupancy term: `hybrid_ddp6_eb600`.
+
+`mae` (charge plus occupancy) stays `config.yaml`'s default and is not nominal.
+
+Missing: no experiment yet tests charge plus occupancy where the model has to find the true
+pixels inside a large wiped region. `mae` asks it only of a candidate list the masker enumerates
+up front (`model.augment.masker.build_candidates`, `neg_per_pos`). The generative grow path,
+where coordinates are grown from the bottleneck into the hole and the prediction set is the
+candidate set, is not in wcfm. Adding it and giving it a preset is the open fifth objective.
+
+A preset's `run.name` is the run it produces, and the file name need not match it:
+`polarmae_short` writes `wcfm_polarmae_200k_b80k`, `polarmae_long` writes
+`wcfm_polarmae_200k_10M_lr35`.
+Compose a preset against its run's `config.yaml` before editing it; only `data.cache_dir`,
+`run.output_root` and, for the two PoLAr-MAE runs, the unread `run.save_every_minutes` differ.
+`hybrid_ddp6_eb600` has no run of its own yet.
+
 ## Data
 
 - Training reads `conf/data/fdhd_2M_mixed_200k.yaml`, the first 200,000 events of the 2M mixed
@@ -65,6 +97,18 @@ Consequences to hold in mind when changing either side:
   `wcfm eval`'s `--data` default: 10,000 of its events per eval set (`--max-images`), one
   `--eval-set-root` shared across the runs being compared. Its runs are disjoint from the 2M
   production, so every probe table is out of sample. A run is never scored on what it trained on.
+- The shared eval set is `/gpfs01/lbne/users/fm/mvicenzi/CONDOR_OUT/wcfm_hybrid_ddp6_eb600/features/eval_set`
+  (`n10000-3dee7078a2ba`). Extraction reads the eval production at the run's per-rank batch, and
+  the reader drops short final batches, so the events it yields depend on the batch: pass
+  `wcfm eval submit ... --batch-size=8`, which reads exactly the set's events. At 16 the pass
+  misses 16 of them and every extract fails with "the eval set was built from different events".
+- CAVEAT: the per-pixel truth of `prod_jay_200k_mixed_sharded`, and so of the shared eval set,
+  predates the Michel labelling fix: the decay electron of a stopping mu- is labelled `Blip`,
+  not `Michel` (about a third of all Michels, and every Michel of a primary CC mu-). Until the
+  truth is regenerated, any Michel or Blip number, and per-pixel semantic scores that pool over
+  them, are provisional. Regenerating means rebuilding the shards, a new eval set, and
+  rescoring every run against it. The 2M training shards carry event truth only and are
+  unaffected.
 - `wcfm submit` under an existing `run.name` resumes that run, so a preset whose data changed
   keeps its name only if the old run directory has moved.
 

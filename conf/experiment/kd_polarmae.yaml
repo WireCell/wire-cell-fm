@@ -1,7 +1,7 @@
 # @package _global_
 #
-# Distillation from `wcfm_polarmae_200k_b80k` epoch 6 into the `kd` student (MinkUNet with the
-# attention bottleneck), on the default training set: two ranks at per-rank batch 20 (global
+# Distillation from `wcfm_polarmae_200k_b80k` (the `polarmae_short` run) epoch 6 into the `kd`
+# student (MinkUNet with the attention bottleneck), on the default training set: two ranks at per-rank batch 20 (global
 # 40), 5 epochs of 5,000 steps. 10 readers (2 ranks x 5 workers) split the 50 shards exactly;
 # a rank count whose reader count does not divide 50 pads every epoch with repeated shards.
 #

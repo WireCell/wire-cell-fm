@@ -130,8 +130,10 @@ wcfm train model=hybrid run.name=demo optim.lr=3e-4         # set one leaf
 wcfm train +experiment=my_run                               # a whole run pinned in a file
 ```
 
-Three objectives ship as presets: `mae` (the default), `dino` and `hybrid`. They are the same
-module with different terms and teacher settings, not different code paths.
+Five objectives ship as presets: `mae` (the default), `dino`, `hybrid`, `kd` and `polarmae`.
+The first four are one module, `ssl`, with different terms, teacher and augmentation;
+`polarmae` is the point-cloud module `pointmae`. `dino`, `hybrid`, `kd` and `polarmae` are the
+nominal ones, each with a final recipe in `conf/experiment/`; [`AGENTS.md`](AGENTS.md) lists them.
 
 Defaults do not live in the YAML. They live in typed dataclasses registered into Hydra's
 ConfigStore — framework blocks in [`wcfm/config/schema.py`](wcfm/config/schema.py), model

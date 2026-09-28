@@ -78,7 +78,7 @@ augment and no teacher, and its two terms run only under it.
 | Sub-group | Options |
 |---|---|
 | `model/backbone/` | `attn_mae`, `polarmae` |
-| `model/augment/` | `crop_mask`, `mask_only`, `mask_region`, `none` |
+| `model/augment/` | `crop_mask`, `crop_only`, `mask_only`, `mask_region`, `none` |
 | `model/masker/` | `block`, `pixel`, `region` |
 | `model/teacher/` | `ema`, `none` |
 | `model/term/` | `dino`, `charge`, `occupancy`, `distill`; `chamfer`, `energy` under `polarmae` |
@@ -122,7 +122,7 @@ mixed production on one GPU.
 `+experiment=<name>`. Note the `+`: `experiment` is not one of `config.yaml`'s slots:
 
 ```bash
-wcfm train +experiment=hybrid_baseline_mixed_b100_pefix
+wcfm train +experiment=hybrid_ddp6_eb600
 ```
 
 The file sets its own `run.name` and whatever else it wants. If it re-points a group
@@ -143,7 +143,7 @@ optim:
 3. Command-line overrides win, so a file is a starting point you can vary from:
 
 ```bash
-wcfm train +experiment=hybrid_baseline_mixed_b100_pefix run.name=my_variant optim.epochs=5
+wcfm train +experiment=hybrid_ddp6_eb600 run.name=my_variant optim.epochs=5
 ```
 
 ### Validation

@@ -1,0 +1,55 @@
+# @package _global_
+#
+# PoLAr-MAE trained on its own, the short run: the reference's pure-SSL baseline pm3_b80k on
+# the default training set. Two ranks at per-rank batch 8 (global 16), so an epoch is 12,500
+# optimizer steps and 6 epochs are 75,000, the reference's 80,000 to within one epoch; a
+# checkpoint lands at every epoch end.
+#
+# AdamW at 7e-5 with a 2000-step linear warmup from 3e-6 and a cosine to 3e-6, weight decay
+# 0.05 held constant, gradient clipping at 3, bf16. The tokenizer runs at `overlap_factor 0.72`,
+# the value every reference training used; 0.5 was their export-time regrouping. The token cap
+# is 2048 against the reference's 512, so no event is truncated.
+#
+# The reference also thinned every event to at most 8000 pixels above 1 ADC. Both knobs are
+# on the module and off here, so the backbone sees whole events; set `model.max_points=8000
+# model.charge_threshold=1.0` to reproduce theirs.
+#
+#   env WCFM_PYENV=<venv> WCFM_REQUEST_MEMORY=48000 WCFM_REQUEST_CPUS=10 \
+#     wcfm submit +experiment=polarmae_short
+#
+# Everything not set below is a schema default.
+
+defaults:
+  - override /model: polarmae
+  - override /launch: multi_2gpu
+  - _self_
+
+run:
+  name: wcfm_polarmae_200k_b80k
+  precision: bf16-mixed
+  save_every: 1
+
+data:
+  global_batch_size: 16   # per-rank 8 on two ranks
+
+model:
+  backbone:
+    context_length: 2048  # schema default is 512, the reference's cap
+    overlap_factor: 0.72
+
+optim:
+  epochs: 6
+  lr: 7.0e-5
+  min_lr: 3.0e-6
+  weight_decay: 0.05
+  weight_decay_end: 0.05
+  clip_grad_norm: 3.0
+  schedules:
+    lr:
+      warmup_epochs: 0.16   # 2000 steps of 12,500 per epoch
+      warmup_value: 3.0e-6
+
+metrics:
+  collectors:
+    spectrum:
+      cadence: 100          # token RankMe and norms, where a collapse shows first

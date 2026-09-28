@@ -1,0 +1,19 @@
+# @package _global_
+#
+# `dino_ctrl` with the teacher's global crop grown to the whole canvas: scale 1.0 at the
+# canvas aspect ratio 1050/1500 makes `_sample_crop_wh` return exactly (1050, 1500), so every
+# local pixel has a teacher target. The aspect range is shared, so the local crops are
+# fixed at that aspect too.
+
+defaults:
+  - dino_ctrl
+  - _self_
+
+run:
+  name: wcfm_dino2M_fullteacher
+
+model:
+  augment:
+    cropper:
+      global_scale: [1.0, 1.0]
+      aspect_ratio: [0.7, 0.7]

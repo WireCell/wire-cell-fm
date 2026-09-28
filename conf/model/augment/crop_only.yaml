@@ -1,0 +1,5 @@
+# Crops and no mask: every student view is a clean crop. Under the dino objective this
+# isolates what the block mask adds, since without injection the mask is pixel dropout.
+defaults:
+  - base_augment
+  - /model/cropper@cropper: default
