@@ -1,0 +1,30 @@
+# @package _global_
+#
+# `polarmae_long` on the whole 2M production instead of its 200,000-event prefix, with the same
+# exposure: the one variable is how often an event repeats, ~5 passes here against ~50.
+# The sharded reader levels its 20 readers (4 ranks x 5 workers) to 26 of the 502 full shards
+# each, so an epoch is 520 shards, 2.08M events, 32,500 optimizer steps; 5 epochs are 162,500
+# steps and 10.4M events. A checkpoint lands at each epoch end, ~2.5 h apart.
+#
+#   env WCFM_PYENV=<venv> WCFM_REQUEST_MEMORY=48000 WCFM_REQUEST_CPUS=20 \
+#     wcfm submit +experiment=polarmae_2M_long
+#
+# Everything not set below comes from polarmae_long.
+
+defaults:
+  - polarmae_long
+  - override /data: fdhd_2M_mixed_sharded
+  - _self_
+
+run:
+  name: wcfm_polarmae_2M_long
+  save_every: 1
+
+data:
+  global_batch_size: 64   # per-rank 16 on four ranks
+
+optim:
+  epochs: 5
+  schedules:
+    lr:
+      warmup_epochs: 0.0615   # 2000 steps of 32,500 per epoch
