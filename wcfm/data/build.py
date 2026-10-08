@@ -62,6 +62,9 @@ def build_dataset(
     so every split today is `train_frac: 1.0` and wiring it now would be wiring a no-op.
     """
     backend = cfg.backend
+    epoch_split = int(getattr(cfg, "epoch_split", 1))
+    if epoch_split != 1 and backend != "sharded":
+        raise ValueError(f"data.epoch_split is read by the sharded backend only, not {backend!r}")
     pixel = bool(getattr(cfg, "return_pixel_truth", False))
     extra = bool(getattr(cfg, "return_extra_truth", False))
 
@@ -103,6 +106,7 @@ def build_dataset(
             world_size=world_size,
             num_workers=num_workers,
             seed=seed,
+            epoch_split=epoch_split,
             return_pixel_truth=pixel,
             return_extra_truth=extra,
         )

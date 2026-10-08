@@ -275,3 +275,62 @@ def test_sharded_batch_size_is_per_rank():
     two = next(iter(build_loader(OmegaConf.create(base), rank=0, world_size=2, num_workers=0)))
     assert one.batch_size == 8
     assert two.batch_size == 4
+
+
+def test_epoch_split_is_refused_off_the_sharded_backend():
+    from omegaconf import OmegaConf
+
+    from wcfm.data.build import build_loader
+
+    cfg = OmegaConf.create({"backend": "packed", "epoch_split": 4, "global_batch_size": 8})
+    with pytest.raises(ValueError, match="epoch_split"):
+        build_loader(cfg)
+
+
+@pytest.mark.needs_data
+def test_epoch_split_cuts_each_pass_into_equal_epochs_that_cover_it():
+    """Epoch-based checkpoints and schedules on a set whose pass is too long to wait for."""
+    from wcfm.data.sharded import ShardedDataset
+
+    K = 4
+    ds = ShardedDataset(str(SHARD_DIR), batch_size=8, epoch_split=K, seed=7)
+    n_full = ds._n_full_shards
+    seen = []
+    for epoch in range(1, K + 1):
+        ds.set_epoch(epoch)
+        seen.append(ds._epoch_shards())
+    assert {len(s) for s in seen} == {-(-n_full // K)}
+    assert set().union(*map(set, seen)) == set(ds.shards[:n_full])
+    assert len(ds) == len(seen[0]) * ds._per_shard // 8
+
+    # A resume at epoch 3 reads what epoch 3 read after epochs 1 and 2.
+    fresh = ShardedDataset(str(SHARD_DIR), batch_size=8, epoch_split=K, seed=7)
+    fresh.set_epoch(3)
+    assert fresh._epoch_shards() == seen[2]
+
+    ds.set_epoch(K + 1)
+    assert ds._epoch_shards() != seen[0]
+
+
+@pytest.mark.needs_data
+def test_epoch_split_partitions_an_epoch_across_ddp_readers():
+    from wcfm.data.sharded import ShardedDataset
+
+    world, workers = 2, 2
+    ranks = [
+        ShardedDataset(
+            str(SHARD_DIR),
+            batch_size=4,
+            rank=r,
+            world_size=world,
+            num_workers=workers,
+            epoch_split=4,
+        )
+        for r in range(world)
+    ]
+    for ds in ranks:
+        ds.set_epoch(2)
+    slices = [ds._ddp_shards(w, workers) for ds in ranks for w in range(workers)]
+    assert {len(s) for s in slices} == {len(slices[0])}
+    assert {p for s in slices for p in s} == set(ranks[0]._epoch_shards())
+    assert len(ranks[0]) == len(ranks[1])

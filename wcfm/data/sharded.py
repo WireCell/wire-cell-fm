@@ -80,6 +80,12 @@ class ShardedDataset(IterableDataset):
 
     Samples that don't fill a complete final batch are dropped (implicit drop_last).
 
+    `epoch_split > 1` makes an epoch a slice of a pass: each pass permutes the full shards
+    once, seeded by `(seed, pass)`, and epoch `e` reads the `(e - 1) % epoch_split`-th of
+    `epoch_split` equal slices, the last one wrapping round to the start of the pass. Every
+    full shard is read once per `epoch_split` epochs, and epoch `e` reads the same shards
+    whichever epoch came before it, so a resume at an epoch boundary continues the pass.
+
     Attributes:
         apa  (int|None):  APA number from metadata.json (None if absent).
         view (str|None):  wire-plane view from metadata.json (None if absent).
@@ -98,7 +104,11 @@ class ShardedDataset(IterableDataset):
         world_size: int = 1,
         num_workers: int = 0,
         seed: int = 42,
+        epoch_split: int = 1,
     ):
+        if int(epoch_split) < 1:
+            raise ValueError(f"epoch_split must be at least 1, got {epoch_split}")
+        self.epoch_split = int(epoch_split)
         self.root_dir   = Path(root_dir)
         self.batch_size = batch_size
         self.rank = rank
@@ -152,20 +162,25 @@ class ShardedDataset(IterableDataset):
         with h5py.File(self.shards[0], "r") as f:
             self._per_shard = int(f["offsets"].shape[0]) - 1
         self._n_full_shards = min(n_samples // self._per_shard, len(self.shards))
+        # Full shards one epoch reads, before the split across readers.
+        self._n_epoch_shards = -(-self._n_full_shards // self.epoch_split)  # ceil
 
         if world_size > 1:
             readers = world_size * max(num_workers, 1)
-            if self._n_full_shards < readers:
+            if self._n_epoch_shards < readers:
                 raise ValueError(
-                    f"{root_dir}: {self._n_full_shards} full shards cannot feed "
-                    f"{readers} readers ({world_size} ranks x {max(num_workers, 1)} "
-                    f"workers) — lower num_workers or use fewer ranks"
+                    f"{root_dir}: {self._n_epoch_shards} full shards per epoch "
+                    f"(epoch_split {self.epoch_split}) cannot feed {readers} readers "
+                    f"({world_size} ranks x {max(num_workers, 1)} workers) — lower "
+                    f"num_workers, epoch_split or the rank count"
                 )
-            per_reader = -(-self._n_full_shards // readers)   # ceil
+            per_reader = -(-self._n_epoch_shards // readers)  # ceil
             # Every reader gets the same number of equally sized shards, so every
             # reader yields the same number of batches and the ranks stay in step.
             per_reader_batches = (per_reader * self._per_shard) // batch_size
             self._n_batches = per_reader_batches * max(num_workers, 1)
+        elif self.epoch_split > 1:
+            self._n_batches = (self._n_epoch_shards * self._per_shard) // batch_size
         else:
             self._n_batches = n_samples // batch_size
 
@@ -209,6 +224,19 @@ class ShardedDataset(IterableDataset):
         """
         self.epoch = epoch
 
+    def _epoch_shards(self) -> list[Path]:
+        """The shards this epoch reads before the split across readers: all of them when
+        `epoch_split` is 1, else this epoch's slice of its pass. The pass permutation is
+        seeded by `(seed, pass)` alone, so every rank and worker cuts the same slice."""
+        if self.epoch_split == 1:
+            return self.shards
+        full = self.shards[: self._n_full_shards]
+        rnd, part = divmod(self.epoch - 1, self.epoch_split)
+        g = torch.Generator().manual_seed(self.seed + rnd)
+        order = torch.randperm(len(full), generator=g).tolist()
+        start = part * self._n_epoch_shards
+        return [full[order[(start + i) % len(full)]] for i in range(self._n_epoch_shards)]
+
     def _ddp_shards(self, worker_id: int, num_workers: int) -> list[Path]:
         """This reader's shards under DDP: an equal, non-overlapping slice.
 
@@ -226,7 +254,7 @@ class ShardedDataset(IterableDataset):
           shards, so every shard is still read each epoch and only the padding is
           seen twice, which is what DistributedSampler does for the same reason.
         """
-        shards = self.shards[: self._n_full_shards]
+        shards = self._epoch_shards()[: self._n_full_shards]
 
         g = torch.Generator().manual_seed(self.seed + self.epoch)
         order = torch.randperm(len(shards), generator=g).tolist()
@@ -251,7 +279,7 @@ class ShardedDataset(IterableDataset):
             shards = self._ddp_shards(worker_id, num_workers)
         else:
             # Single process: split shards round-robin across DataLoader workers.
-            shards = self.shards
+            shards = self._epoch_shards()
             if worker_info is not None:
                 shards = shards[worker_id::num_workers]
 

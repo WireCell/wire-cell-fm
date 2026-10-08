@@ -1,9 +1,13 @@
 # @package _global_
 #
-# Distillation from `wcfm_polarmae_200k_b80k` (the `polarmae_short` run) epoch 6 into the `kd`
-# student (MinkUNet with the attention bottleneck), on the default training set: two ranks at per-rank batch 20 (global
-# 40), 5 epochs of 5,000 steps. 10 readers (2 ranks x 5 workers) split the 50 shards exactly;
-# a rank count whose reader count does not divide 50 pads every epoch with repeated shards.
+# Distillation from `wcfm_polarmae_200k_10M_lr35_gnorm` (the `polarmae_long_globalnorm` run)
+# epoch 42 into the `kd` student (MinkUNet with the attention bottleneck), on the default
+# training set: two ranks at per-rank batch 20 (global 40), 10 epochs of 5,000 steps. 10 readers
+# (2 ranks x 5 workers) split the 50 shards exactly; a rank count whose reader count does not
+# divide 50 pads every epoch with repeated shards.
+#
+# The teacher normalises with `norm: global`, one mean and std over every token of the rank's
+# batch, so its targets depend on the per-rank batch: changing it changes what is distilled.
 #
 #   env WCFM_PYENV=<venv> WCFM_REQUEST_CPUS=10 wcfm submit +experiment=kd_polarmae
 
@@ -12,7 +16,7 @@ defaults:
   - _self_
 
 run:
-  name: wcfm_kd_polarmae
+  name: wcfm_kd_polarmae_gnorm
   save_every: 1
 
 launch:
@@ -24,7 +28,7 @@ data:
 model:
   terms:
     distill:
-      checkpoint: /gpfs01/lbne/users/fm/mvicenzi/CONDOR_OUT/wcfm_polarmae_200k_b80k/checkpoints/checkpoint_epoch6.pt
+      checkpoint: /gpfs01/lbne/users/fm/mvicenzi/CONDOR_OUT/wcfm_polarmae_200k_10M_lr35_gnorm/checkpoints/checkpoint_epoch42.pt
 
 optim:
-  epochs: 5
+  epochs: 10

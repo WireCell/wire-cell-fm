@@ -1,0 +1,41 @@
+# @package _global_
+#
+# The reference's pure-SSL pm3_b80k recipe on the whole 2M production, one pass: one rank at
+# batch 16, AdamW at 7e-5 with a 2000-step warmup from 3e-6 and a cosine to 3e-6, weight decay
+# 0.05, clipping at 3, bf16, the batch-global norm over the rank's 16 events, overlap 0.72, and
+# every event thinned to at most 8000 pixels above 1 ADC. The charge normalisation and the
+# events are this production's, not the reference's.
+#
+# `data.epoch_split: 10` cuts the pass into ten epochs of 51 of the 502 full shards: 204,000
+# events, 12,750 steps, one checkpoint each. Ten epochs are 127,500 steps; 8 shards are read
+# twice. `norm: global` makes features depend on the batch: score with `--batch-size=8`.
+#
+#   env WCFM_PYENV=<venv> WCFM_REQUEST_MEMORY=48000 WCFM_REQUEST_CPUS=10 \
+#     wcfm submit +experiment=polarmae_2M_fork
+#
+# Everything not set below comes from polarmae_short.
+
+defaults:
+  - polarmae_short
+  - override /data: fdhd_2M_mixed_sharded
+  - override /launch: single_gpu
+  - _self_
+
+run:
+  name: wcfm_polarmae_2M_fork
+
+data:
+  global_batch_size: 16
+  epoch_split: 10
+
+model:
+  max_points: 8000
+  charge_threshold: 1.0
+  backbone:
+    norm: global
+
+optim:
+  epochs: 10
+  schedules:
+    lr:
+      warmup_epochs: 0.157   # 2000 steps of 12,750 per epoch

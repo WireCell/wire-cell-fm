@@ -65,6 +65,10 @@ class DataConfig:
     cache_dir: str = "./data"
     buffer_size: int = 3000
     n_subset: int = -1
+    # Sharded backend only: each pass over the shards is cut into this many epochs, so a
+    # checkpoint and every epoch-based schedule fall that many times per pass. `optim.epochs`
+    # counts these epochs. Changing it on a resume changes which shards the next epoch reads.
+    epoch_split: int = 1
 
     # Per-pixel truth is opt-in on all three backends because HDF5 decompresses those datasets
     # on every read; event-level truth is always returned. `extra` implies `pixel`.
