@@ -328,7 +328,7 @@ def test_a_real_short_run_writes_a_run_directory_and_a_metrics_stream(conf_dir, 
 # from the config -- had never executed. This closes it against the real production: /gpfs01 is
 # mounted on the login node and the sparse readers are pure IO, so it needs no GPU.
 
-SHARD_DIR = Path("/gpfs01/lbne/users/fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W")
+SHARD_DIR = Path("/gpfs01/lbne/users/fm/cffm-data/shards_fdhd_sparse_smeared_200k_mixed_apa0W_rich")
 
 
 @pytest.mark.needs_data
@@ -351,7 +351,7 @@ def test_run_trains_from_a_config_built_loader_against_real_shards(conf_dir, tmp
             config_name="config",
             overrides=[
                 "model=toy",
-                "data=prod_jay_200k_mixed_sharded",
+                "data=fdhd_smeared_200k_mixed_michelfix_sharded",
                 "run.name=real_run",
                 f"run.output_root={tmp_path}",
                 "run.num_workers=0",
@@ -405,7 +405,7 @@ def test_a_toy_model_still_gets_the_real_batch_shape(conf_dir, tmp_path):
             config_name="config",
             overrides=[
                 "model=toy",
-                "data=prod_jay_200k_mixed_sharded",
+                "data=fdhd_smeared_200k_mixed_michelfix_sharded",
                 f"run.output_root={tmp_path}",
                 "run.name=shape",
                 "data.global_batch_size=4",

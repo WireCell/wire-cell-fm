@@ -3,8 +3,9 @@
 # together into shards of 4000 by `wcfm.data.prep.create_shards`.
 #
 # Training only. The shards carry event-level truth (flavour, CC/NC, energy, vertex) and no
-# per-pixel labels, so `data.return_pixel_truth=true` fails here; evaluation stays on the
-# 200k set, whose runs are disjoint from these. Everything not stated is the DataConfig
+# per-pixel labels, so `data.return_pixel_truth=true` fails here; evaluation runs on
+# `fdhd_smeared_200k_mixed_michelfix_sharded`, whose runs (018020, 018023) are disjoint from
+# these. Everything not stated is the DataConfig
 # default: buffer_size 3000, the production geometry and the log normalisation.
 backend: sharded
 sharded_dir: /gpfs01/lbne/users/fm/cffm-data/shards_fdhd_sparse_2M_mixed_apa0W

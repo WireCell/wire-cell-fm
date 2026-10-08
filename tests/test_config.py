@@ -119,8 +119,8 @@ def test_framework_axes_compose(hydra_conf):
 def test_group_selection_and_dotted_overrides(hydra_conf):
     cfg = compose(
         config_name="config",
-        overrides=["model=_stub", "data=prod_jay_200k_mixed_sharded", "launch=multi_2gpu",
-                   "optim.lr=3e-4"],
+        overrides=["model=_stub", "data=fdhd_smeared_200k_mixed_michelfix_sharded",
+                   "launch=multi_2gpu", "optim.lr=3e-4"],
     )
     assert cfg.data.backend == "sharded"
     assert cfg.launch.devices == 2
@@ -188,7 +188,8 @@ def test_the_metrics_presets_and_the_sharded_production_compose(hydra_conf):
     cfgs = {
         name: compose(
             config_name="config",
-            overrides=["model=_stub", f"metrics={name}", "data=prod_jay_200k_mixed_sharded"],
+            overrides=["model=_stub", f"metrics={name}",
+                       "data=fdhd_smeared_200k_mixed_michelfix_sharded"],
         )
         for name in ("minimal", "default", "full")
     }

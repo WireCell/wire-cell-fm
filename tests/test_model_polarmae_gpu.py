@@ -29,7 +29,10 @@ from .test_model_polarmae_ops import cloud, sequential_cnms  # noqa: E402
 
 pytestmark = pytest.mark.gpu
 
-SHARD = "/gpfs01/lbne/users/fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W/shard_00000.h5"
+SHARD = (
+    "/gpfs01/lbne/users/fm/cffm-data/shards_fdhd_sparse_smeared_200k_mixed_apa0W_rich"
+    "/shard_00000.h5"
+)
 
 
 @pytest.fixture

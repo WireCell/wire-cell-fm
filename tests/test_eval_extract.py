@@ -625,6 +625,38 @@ def test_a_truth_column_missing_from_some_batches_is_refused(tmp_path):
         )
 
 
+def test_a_new_eval_set_stores_the_rich_tier_and_its_tables(tmp_path):
+    """The rich tier's pixel columns sit beside the others, and each table is CSR over the
+    events, with an event that has no rows of a table kept as an empty slice."""
+    from wcfm.data import truth as tiers
+
+    ckpt = tmp_path / "c.pt"
+    write_checkpoint(ckpt)
+    data = batches(2)
+    n_rows = [0, 2, 1, 3, 0, 1]  # per event, every table
+    for i, b in enumerate(data):
+        for key, dtype in tiers.RICH_PIXEL.items():
+            b.meta[key] = [np.ones(len(a), dtype=dtype) for a in b.meta["pixel_labels"]]
+        for name in tiers.TABLE_COLUMNS:
+            b.meta[name] = [
+                tiers.empty_table_column(name, n_rows[3 * i + j]) + (3 * i + j)
+                for j in range(3)
+            ]
+    extract(
+        ckpt, store_root=tmp_path / "f", eval_set_root=tmp_path / "e",
+        loader=data, sources=("student",),
+    )
+    es = EvalSet.load(tmp_path / "e")
+    assert set(tiers.RICH_PIXEL) <= set(es.truth_arrays)
+    assert len(es.read(tmp_path / "e", "pixel_pdg")) == 6 * 6
+    for t in tiers.TABLES:
+        off = es.read(tmp_path / "e", f"{t}_offsets")
+        assert off.tolist() == np.concatenate([[0], np.cumsum(n_rows)]).tolist()
+    trackid = es.read(tmp_path / "e", "mcpart_trackid")
+    assert trackid.tolist() == [e for e, n in enumerate(n_rows) for _ in range(n)]
+    assert es.read(tmp_path / "e", "vertex_uvwt").shape == (sum(n_rows), 4)
+
+
 def test_a_repeated_event_key_is_refused(tmp_path):
     ckpt = tmp_path / "c.pt"
     write_checkpoint(ckpt)

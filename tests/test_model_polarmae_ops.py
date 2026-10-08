@@ -23,7 +23,10 @@ from wcfm.model.backbones.polarmae.ops import (  # noqa: E402
 from wcfm.model.backbones.polarmae.tokenizer import PointcloudGrouping  # noqa: E402
 
 PITCH = 1.0 / 600.0
-SHARD = "/gpfs01/lbne/users/fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W/shard_00000.h5"
+SHARD = (
+    "/gpfs01/lbne/users/fm/cffm-data/shards_fdhd_sparse_smeared_200k_mixed_apa0W_rich"
+    "/shard_00000.h5"
+)
 
 
 def lattice_cloud(B=3, P=500, seed=0, lengths=(500, 320, 9), span=60):

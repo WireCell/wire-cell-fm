@@ -93,22 +93,24 @@ Compose a preset against its run's `config.yaml` before editing it; only `data.c
   production, through `conf/config.yaml`'s `data:` default. A preset says `override /data:` only
   to leave it, and `fdhd_2M_mixed_sharded` is the whole set for the preset that wants it. No
   preset restates `n_subset`; the subset is the data option's.
-- Evaluation reads `prod_jay_200k_mixed_sharded`, the production with per-pixel truth, through
-  `wcfm eval`'s `--data` default: 10,000 of its events per eval set (`--max-images`), one
-  `--eval-set-root` shared across the runs being compared. Its runs are disjoint from the 2M
-  production, so every probe table is out of sample. A run is never scored on what it trained on.
-- The shared eval set is `/gpfs01/lbne/users/fm/mvicenzi/CONDOR_OUT/wcfm_hybrid_ddp6_eb600/features/eval_set`
-  (`n10000-3dee7078a2ba`). Extraction reads the eval production at the run's per-rank batch, and
-  the reader drops short final batches, so the events it yields depend on the batch: pass
+- Evaluation reads `fdhd_smeared_200k_mixed_michelfix_sharded`, the production with per-pixel
+  truth, through `wcfm eval`'s `--data` default: 10,000 of its events per eval set
+  (`--max-images`), one `--eval-set-root` shared across the runs being compared. Its MC requests,
+  018020 and 018023, are disjoint from the 2M production's (013717-013826, 016898-016907), so
+  every probe table is out of sample. A run is never scored on what it trained on. Its labels
+  carry the Michel fix (the decay electron of a stopping mu- is `Michel`, not `Blip`), its truth
+  is smeared to signal-processing resolution, and it has the rich tier; 271 of its events have no
+  W pixels and are kept empty.
+- The shared eval set is `/gpfs01/lbne/users/fm/mvicenzi/CONDOR_OUT/eval_sets/fdhd_smeared_200k_michelfix_n10000`
+  (`n10000-db97caa5bc2d`): the first 10,000 events, 16 of them empty, with every truth tier,
+  the rich tier's tables included. It was written by a truth-only pass at batch 8 with 4 loader
+  workers. Extraction reads the eval production at the run's per-rank batch, and the reader
+  drops short final batches, so the events it yields depend on the batch: pass
   `wcfm eval submit ... --batch-size=8`, which reads exactly the set's events. At 16 the pass
   misses 16 of them and every extract fails with "the eval set was built from different events".
-- CAVEAT: the per-pixel truth of `prod_jay_200k_mixed_sharded`, and so of the shared eval set,
-  predates the Michel labelling fix: the decay electron of a stopping mu- is labelled `Blip`,
-  not `Michel` (about a third of all Michels, and every Michel of a primary CC mu-). Until the
-  truth is regenerated, any Michel or Blip number, and per-pixel semantic scores that pool over
-  them, are provisional. Regenerating means rebuilding the shards, a new eval set, and
-  rescoring every run against it. The 2M training shards carry event truth only and are
-  unaffected.
+- The previous set, built from Jay's 200k production, is retired as
+  `wcfm_hybrid_ddp6_eb600/features/eval_set_retired_prod_jay_n10000-3dee7078a2ba`. Its labels
+  predate the Michel fix, so its probe tables are not comparable with the new set's.
 - `wcfm submit` under an existing `run.name` resumes that run, so a preset whose data changed
   keeps its name only if the old run directory has moved.
 

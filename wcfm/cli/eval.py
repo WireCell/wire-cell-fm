@@ -86,8 +86,9 @@ extract options:
   --pool-seed=N       seed for the split and pools (default: 42)
   --device=cuda|cpu   (default: cuda if available)
   --eval-set-root=P   share an eval set across runs (default: <run_dir>/features/eval_set)
-  --data=NAME         the production to score on (default: prod_jay_200k_mixed_sharded,
-                      the one with per-pixel truth). Never the run's own: training runs on
+  --data=NAME         the production to score on (default:
+                      fdhd_smeared_200k_mixed_michelfix_sharded, the one with per-pixel
+                      truth). Never the run's own: training runs on
                       the 2M set, which has none. The batch size, seed and charge transform
                       still come from the run
   --out-root=P        where feature stores go       (default: <run_dir>/features)
@@ -152,7 +153,7 @@ def _charge_transform(cfg) -> tuple[str, dict]:
     return f"log[{lo},{hi}]", {"kind": "log", "min_val": float(lo), "max_val": float(hi)}
 
 
-EVAL_DATA = "prod_jay_200k_mixed_sharded"
+EVAL_DATA = "fdhd_smeared_200k_mixed_michelfix_sharded"
 """The production extraction reads unless `--data` says otherwise. Extraction forces per-pixel
 and extra truth on, and the training set (`fdhd_2M_mixed_200k` and its parent) carries neither,
 so a run is never scored on its own production; this one has the truth and its runs are disjoint
@@ -267,6 +268,9 @@ def _extract(argv: list[str]) -> int:
     # merge -- the whole DAG produces stores and no table. A production whose shards were built
     # without `--with_extra_truth` raises here instead, naming the rebuild.
     data_cfg.return_extra_truth = True
+    # The rich tier goes into a new eval set too, so the set holds every truth column the
+    # production has. A production built without it raises here, naming the rebuild.
+    data_cfg.return_rich_truth = True
 
     device = flags.get("device") or ("cuda" if _cuda() else "cpu")
     seed = int(cfg.get("run", {}).get("seed", 42))

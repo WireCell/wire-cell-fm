@@ -1,0 +1,9 @@
+# `fdhd_smeared_200k_mixed_michelfix_sharded` read through the packed reader: the same events,
+# in one 69.2 GB uncompressed `.npz`. The reader loads the requested members into RAM, about
+# 13 GB without truth and 69 GB with the rich tier, so request memory to match.
+defaults:
+  - fdhd_smeared_200k_mixed_michelfix_sharded
+
+backend: packed
+packed_path: /gpfs01/lbne/users/fm/cffm-data/packed_fdhd_sparse_smeared_200k_mixed_apa0W_rich.npz
+sharded_dir: ""

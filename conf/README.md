@@ -40,7 +40,7 @@ merger plus a `_target_` to `__init__` caller.
 | Group | Default | Other options | What it is |
 |---|---|---|---|
 | `model/` | `mae` | `dino`, `hybrid`, `kd`, `polarmae` | the training objective |
-| `data/` | `fdhd_2M_mixed_200k` | `fdhd_2M_mixed_sharded`, `prod_jay_200k_mixed_sharded`, `prod_jay_200k_mixed_packed`, `prod_jay_100k` | which production, and how to read it |
+| `data/` | `fdhd_2M_mixed_200k` | `fdhd_2M_mixed_sharded`, `fdhd_smeared_200k_mixed_michelfix_sharded`, `fdhd_smeared_200k_mixed_michelfix_packed`, `prod_jay_100k` | which production, and how to read it |
 | `optim/` | `adamw_cosine` | — | the optimizer and its schedules |
 | `run/` | `default` | — | name, seed, precision, resume, checkpoint cadence |
 | `metrics/` | `default` | `minimal`, `full` | which collectors run |
@@ -51,20 +51,24 @@ The `data/` blocks are three productions across three readers, plus the training
 
 | Block | Reader | Events | Where |
 |---|---|---|---|
-| `prod_jay_200k_mixed_sharded` | `sharded` — streams 200 HDF5 shards | 199,870 | `fm/cffm-data/shards_fhdh_sparse_200k_mixed_apa0W` |
-| `prod_jay_200k_mixed_packed` | `packed` — one 27.8 GB `.npz` held in RAM | 199,870 | `fm/cffm-data/packed/packed_fhdh_sparse_200k_mixed_apa0W.npz` |
+| `fdhd_smeared_200k_mixed_michelfix_sharded` | `sharded` — streams 200 HDF5 shards, 24 GB | 199,740 | `fm/cffm-data/shards_fdhd_sparse_smeared_200k_mixed_apa0W_rich` |
+| `fdhd_smeared_200k_mixed_michelfix_packed` | `packed` — one 69.2 GB `.npz`, requested members held in RAM | 199,740 | `fm/cffm-data/packed_fdhd_sparse_smeared_200k_mixed_apa0W_rich.npz` |
 | `prod_jay_100k` | `direct` — reads the production tree | ~100k | `bnayak/cffm-data/prod-jay-100k-truth-2026-06-11` |
 | `fdhd_2M_mixed_sharded` | `sharded` — ~500 shards of 4000, event truth only | ~2.0M | `fm/cffm-data/shards_fdhd_sparse_2M_mixed_apa0W` |
 | `fdhd_2M_mixed_200k` | the block above, `n_subset: 200000` — its first 50 shards | 200,000 | same |
 
-The two `200k_mixed` blocks are the *same events*, so a run can change reader without changing
-what it trains on. `packed` needs `request_memory` well above `wcfm submit`'s 32 GB default.
+The two `michelfix` blocks are the *same events*, so a run can change reader without changing
+what it reads. They are MC requests 018020 (numu) and 018023 (nueswap), with every truth tier
+(pixel, extra and rich; `wcfm.data.truth` lists the keys), labels `classes7_v1` with the decay
+electron of a stopping mu- as Michel, and truth smeared to signal-processing resolution, so
+about 93% of reco pixels carry a label. `packed` loads about 13 GB without truth and 69 GB with
+the rich tier, so it needs `request_memory` well above `wcfm submit`'s 32 GB default.
 Training runs on `fdhd_2M_mixed_200k` unless a preset overrides it: the 2M production is numu
 and nue shuffled together at creation, so its first 50 shards are an unbiased 200k sample, and a
 preset that wants the whole set selects `fdhd_2M_mixed_sharded`. Neither carries per-pixel truth,
-so `wcfm eval` scores every run on `prod_jay_200k_mixed_sharded` (its `--data` default, 10,000
-events of it per eval set), whose runs are disjoint from the 2M production: every probe table is
-out of sample. A shard
+so `wcfm eval` scores every run on `fdhd_smeared_200k_mixed_michelfix_sharded` (its `--data`
+default, 10,000 events of it per eval set), whose runs are disjoint from the 2M production: every
+probe table is out of sample. A shard
 set is built by `wcfm datagen <job> create_shards ...`, which queues
 `wcfm.data.prep.create_shards` on a CPU worker; `python -m wcfm.data.prep.create_shards --help`
 lists the arguments, and an archived production is first unpacked with
@@ -111,7 +115,7 @@ You can configure entirely on the command line, entirely in a file, or mix the t
 1. From the command line:
 ```bash
 wcfm train model=dino run.name=demo
-wcfm train model=hybrid run.name=demo data=prod_jay_200k_mixed_packed launch=multi_2gpu
+wcfm train model=hybrid run.name=demo data=fdhd_smeared_200k_mixed_michelfix_packed launch=multi_2gpu
 wcfm train model=dino run.name=demo optim.lr=3e-4 model.backbone.heads=8
 ```
 `group=option` swaps a block, `some.nested.key=value` sets one leaf. Nothing is mandatory —

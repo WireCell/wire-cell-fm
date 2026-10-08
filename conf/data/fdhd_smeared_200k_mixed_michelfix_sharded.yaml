@@ -1,0 +1,17 @@
+# The smeared mixed (numu+nueswap) 200k production, MC requests 018020 (nominal) and 018023
+# (nueswap), apa 0 / view W only, read through the sharded reader.
+#
+# From the tree's own metadata.json:
+#   n_samples 199740, n_shards 200, shard_size 1000, seed 42
+#   pixel_truth true, extra_truth true, rich_truth true, label_format classes7_v1
+#   classes: Background, Track, Shower, Michel, DeltaRay, Blip, Other
+#   vertex t0_ticks -0.649
+#
+# Per-pixel labels follow the Michel fix: the decay e- of a stopping mu- is Michel, not Blip.
+# The truth is smeared to signal-processing resolution, so about 93% of reco pixels carry it.
+# 271 events have no W pixels and are kept as empty events. Every truth tier is opt-in
+# (data.return_pixel_truth / return_extra_truth / return_rich_truth); `wcfm.data.truth` lists
+# what each holds.
+backend: sharded
+sharded_dir: /gpfs01/lbne/users/fm/cffm-data/shards_fdhd_sparse_smeared_200k_mixed_apa0W_rich
+global_batch_size: 100

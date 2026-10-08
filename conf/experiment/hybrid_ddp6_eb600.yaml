@@ -4,10 +4,11 @@
 # training set, 100 epochs: six ranks,
 # per-rank batch 100, lr 6e-4. Metrics are the full collector set bar two, disabled below.
 #
-# The reference run of this recipe, `wcfm_hybrid_ddp6_eb600`, trained on
-# `prod_jay_200k_mixed_sharded`, the evaluation production, so its probe tables are in-sample.
+# The reference run of this recipe, `wcfm_hybrid_ddp6_eb600`, trained on Jay's 200k mixed
+# production (MC requests 016895 and 016908), so its probe tables on that production are
+# in-sample; `fdhd_smeared_200k_mixed_michelfix_sharded` shares none of its runs.
 # This preset trains on the default set under its own name; never point `run.name` back at
-# that directory: it holds the shared eval set, and a submit under its name resumes it.
+# that directory: a submit under its name resumes it.
 #
 #   WCFM_REQUEST_MEMORY=64000 WCFM_REQUEST_CPUS=24 \
 #     wcfm submit +experiment=hybrid_ddp6_eb600

@@ -57,6 +57,7 @@ from typing import Any
 
 import numpy as np
 
+from wcfm.data import truth as tiers
 from wcfm.data.voxels import voxels_from
 
 from .format import EvalSet, FeatureBlock, FeatureStore, Provenance, event_key_hash
@@ -70,14 +71,9 @@ from .pools import (
 )
 from .rawcharge import raw_charge_from
 
-#: Per-pixel truth tiers and the dtype each is stored as, from the old extractor's
-#: `PIXEL_TRUTH_KEYS`. Present only if the reader was asked for them.
-PIXEL_TRUTH: dict[str, Any] = {
-    "pixel_labels": np.int8,
-    "pixel_energyfrac": np.float32,
-    "pixel_trackid": np.int32,
-    "pixel_truth_q": np.float32,
-}
+#: Per-pixel truth of every tier and the dtype each is stored as. A key is stored only if the
+#: reader was asked for its tier; `wcfm.data.truth` lists the tiers.
+PIXEL_TRUTH: dict[str, Any] = tiers.pixel_keys(pixel=True, extra=True, rich=True)
 
 #: Event-level truth: the reader's meta key -> the name it is stored under, and its dtype.
 #: `label` is renamed to `labels` on disk because that is the name the probe suite reads.
@@ -347,6 +343,7 @@ class _TruthPass:
         self.max_images = max_images
         self.event: dict[str, list] = {k: [] for k in EVENT_TRUTH}
         self.pixel: dict[str, list] = {}
+        self.tables: list[dict] = []
         self.vertex: list = []
         self.event_keys: list[str] = []
         self.positions: list = []
@@ -389,6 +386,11 @@ class _TruthPass:
             if key in meta:
                 col = _concat_pixel(meta[key])
                 self.pixel.setdefault(key, []).append(col[:keep_pixels])
+        # The rich tier's tables, one row per event; stored only if every batch carries them,
+        # since `stack_tables` needs every event's rows.
+        if all(name in meta for name in tiers.TABLE_COLUMNS):
+            for b in range(take):
+                self.tables.append({name: _to_numpy(meta[name][b]) for name in tiers.TABLE_COLUMNS})
 
         self.n_events += take
         self.n_pixels += keep_pixels
@@ -409,6 +411,8 @@ class _TruthPass:
         for key, dtype in PIXEL_TRUTH.items():
             if key in self.pixel:
                 truth[key] = np.concatenate(self.pixel[key], axis=0).astype(dtype)
+        if self.tables:
+            truth.update(tiers.stack_tables(self.tables))
 
         geometry = {
             "positions": np.concatenate(self.positions, axis=0).astype(np.int32),
@@ -623,6 +627,10 @@ def _check_columns(truth, geometry, keys, *, n_events: int, n_pixels: int) -> No
     """
     expect = {**dict.fromkeys(EVENT_TRUTH_NAMES, n_events), "vertex_xyz": n_events}
     expect.update(dict.fromkeys(PIXEL_TRUTH, n_pixels))
+    expect.update(dict.fromkeys(tiers.TABLE_OFFSETS, n_events + 1))
+    for name, (table, _, _) in tiers.TABLE_COLUMNS.items():
+        if name in truth:
+            expect[name] = int(truth[f"{table}_offsets"][-1])
     for name, arr in truth.items():
         want = expect.get(name)
         if want is not None and len(arr) != want:
