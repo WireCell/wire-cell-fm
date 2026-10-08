@@ -13,34 +13,10 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["DEFAULT_VERTEX_T0_TICKS", "vertex_distance"]
+from wcfm.data.vertices import DEFAULT_VERTEX_T0_TICKS, in_volume
+from wcfm.data.wire_geometry import WireGeometry
 
-# The drift-to-tick offset: a measured constant, not zero and not a fit performed at run time.
-#
-# The projection is `tick = drift_cm / 0.321126 + t0`; the channel half needs no parameter. t0
-# absorbs the frame reference time, WireCell's response-plane offset, any tick cropping, and
-# the pixel-bin indexing convention, so it is a property of how the images were made rather
-# than a physical constant -- which is why it is named here, overridable, and recorded in every
-# result.
-#
-# Measured, not assumed. Projecting charged-track 3D endpoints (mcpart start/end_xyzts joined
-# to their footprint pixels through track_ids) against the pixels' actual tick, over 2116
-# measurements in 282 events of prod-jay-100k-truth-2026-06-11, gives -0.649 ticks, 95% CI
-# [-0.729, -0.596] (event-clustered bootstrap). That is what rules out the earlier t0 = 0.
-#
-# Most of the offset is a BINNING convention, not timing: a stored pixel tick is an integer bin
-# index whose centre sits at index+0.5, while the projection is continuous, so
-# index-minus-continuous earns -0.5 for free. Refitting against bin centres leaves -0.149
-# [-0.229, -0.096], so the genuine frame/response-plane term is only ~0.15 tick. The value to
-# USE is the index one, because the metric compares projected ticks against integer pixel
-# coordinates.
-#
-# Moving t0 by 0.8 tick -- five times the width of the CI -- shifts only 0.089% of pixels
-# across the 20 px radius, so the metric is insensitive to this at the level it is known. The
-# reason to get it right is to rule out a multi-tick error, not to chase the third decimal.
-#
-# Vertex numbers recorded before 2026-08-05 were taken at t0 = 0.
-DEFAULT_VERTEX_T0_TICKS = -0.649
+__all__ = ["DEFAULT_VERTEX_T0_TICKS", "vertex_distance"]
 
 
 def vertex_distance(
@@ -65,7 +41,6 @@ def vertex_distance(
     Returns `(dist, valid, info)`: `dist` is NaN where there is no projection and `valid` is
     `isfinite(dist)`.
     """
-    from wcfm.data.wire_geometry import WireGeometry  # pure numpy, no warpconvnet
 
     positions = np.asarray(positions)
     offsets = np.asarray(offsets)
@@ -74,7 +49,6 @@ def vertex_distance(
     n_events = len(offsets) - 1
 
     geom = WireGeometry.load(t0_ticks=t0_ticks)
-    ymin, ymax, zmin, zmax = geom.apa_bbox(int(apa))
 
     dist = np.full(n_pixels, np.nan, dtype=np.float32)
     n_ok = n_outside = 0
@@ -83,11 +57,7 @@ def vertex_distance(
         if b == a:
             continue
         xyz = vertex_xyz[ev]
-        if not (
-            ymin - 5 <= xyz[1] <= ymax + 5
-            and zmin - 5 <= xyz[2] <= zmax + 5
-            and abs(xyz[0]) < 360.0
-        ):
+        if not in_volume(geom, xyz, int(apa)):
             n_outside += 1
             continue
         _, u, v, w, tick = geom.project(xyz, apa=int(apa))

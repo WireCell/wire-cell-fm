@@ -9,10 +9,10 @@ tensors are concatenated into one file using a CSR `offsets` layout, in
 dataset index order (no shuffle) — pack sample i == dataset sample i, which
 makes exact equivalence tests possible.
 
-Event truth is always packed (a few scalars per event). Per-pixel truth tiers
-are on by default: npz members load lazily, so truth baked into the pack costs
-training nothing. Disable with --no_pixel_truth /
---no_extra_truth to shrink the file.
+Event truth is always packed (a few scalars per event). The `wcfm.data.truth`
+tiers are on by default: npz members load lazily, so truth baked into the pack
+costs training nothing. Disable with --no_pixel_truth / --no_extra_truth /
+--no_rich_truth to shrink the file; each drops the tiers after it too.
 
 Output arrays (CSR over E events):
     coords    (ΣN, 2) int32     rebased (channel, tick) per pixel
@@ -30,7 +30,11 @@ Output arrays (CSR over E events):
     pixel_energyfrac (ΣN,) f32  truth-overlap score (frame_energyfrac_1st)
     pixel_trackid    (ΣN,) i32  signed truth track id (frame_trackid_1st)
     pixel_truth_q    (ΣN,) f32  truth charge (frame_total_numelectrons)
-  scalars: apa (int), view (str), truth_format ("classes7_v1"), class_names
+  with rich truth (default): the `wcfm.data.truth.RICH_PIXEL` arrays, CSR-aligned
+    to coords like the above, and per table t of `wcfm.data.truth.TABLES`
+    t_offsets (E+1,) int64 and its columns t_<column>, CSR over events
+  scalars: apa (int), view (str), truth_format ("classes7_v1"), class_names,
+    and with rich truth vertex_t0_ticks (float) and vertex_parameters (json str)
 
 Usage:
     python -m wcfm.data.prep.pack_dataset \\
@@ -44,24 +48,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
+from wcfm.data import truth, vertices
 from wcfm.data.direct import DirectDataset
-
-TRUTH_FORMAT = "classes7_v1"
-CLASS_NAMES = ["Background", "Track", "Shower", "Michel", "DeltaRay", "Blip", "Other"]
-
-# Per-pixel truth: meta key -> output dtype.
-PIXEL_SPEC = {"pixel_labels": np.int8}
-EXTRA_SPEC = {
-    "pixel_energyfrac": np.float32,
-    "pixel_trackid":    np.int32,
-    "pixel_truth_q":    np.float32,
-}
 
 
 class _Extract(torch.utils.data.Dataset):
@@ -70,9 +65,9 @@ class _Extract(torch.utils.data.Dataset):
     instead of Voxels, so reading the ~10k raw files can be parallelised.
     """
 
-    def __init__(self, ds: DirectDataset, pixel_keys: tuple):
+    def __init__(self, ds: DirectDataset, keys: tuple):
         self.ds = ds
-        self.pixel_keys = pixel_keys
+        self.keys = keys
 
     def __len__(self):
         return len(self.ds)
@@ -92,7 +87,7 @@ class _Extract(torch.utils.data.Dataset):
             "vertex_xyz": np.asarray(meta["vertex_xyz"], dtype=np.float32),
             "event_key":  str(meta["event_key"]),
         }
-        for k in self.pixel_keys:
+        for k in self.keys:
             out_meta[k] = np.asarray(meta[k])
         coords = vox.coordinate_tensor.numpy().astype(np.int32)   # (N, 2)
         feats  = vox.feature_tensor.numpy().astype(np.float32)    # (N, 1)
@@ -113,20 +108,14 @@ def pack_dataset(
     n_subset: int = -1,
     with_pixel_truth: bool = True,
     with_extra_truth: bool = True,
+    with_rich_truth: bool = True,
     num_workers: int = 8,
     log_every: int = 500,
 ) -> None:
     # Belt-and-suspenders against fd exhaustion when streaming ~100k worker results.
     torch.multiprocessing.set_sharing_strategy("file_system")
 
-    if with_extra_truth:
-        with_pixel_truth = True
-    pixel_spec = {}
-    if with_pixel_truth:
-        pixel_spec.update(PIXEL_SPEC)
-    if with_extra_truth:
-        pixel_spec.update(EXTRA_SPEC)
-
+    pixel_spec = truth.pixel_keys(with_pixel_truth, with_extra_truth, with_rich_truth)
     ds = DirectDataset(
         datadir=datadir,
         apa=apa,
@@ -135,14 +124,16 @@ def pack_dataset(
         cache_dir=cache_dir,
         return_pixel_truth=with_pixel_truth,
         return_extra_truth=with_extra_truth,
+        return_rich_truth=with_rich_truth,
     )
 
     n_total = len(ds)
     n = n_total if n_subset < 0 else min(n_subset, n_total)
     print(f"Packing {n}/{n_total} events  (apa={apa}, view={view}, "
-          f"pixel_truth={with_pixel_truth}, extra_truth={with_extra_truth})")
+          f"truth={sorted(pixel_spec)}, rich_truth={with_rich_truth})")
 
-    wrapped = Subset(_Extract(ds, tuple(pixel_spec)), list(range(n)))
+    table_keys = tuple(truth.TABLE_COLUMNS) if with_rich_truth else ()
+    wrapped = Subset(_Extract(ds, tuple(pixel_spec) + table_keys), list(range(n)))
     loader = DataLoader(
         wrapped,
         batch_size=1,
@@ -154,6 +145,7 @@ def pack_dataset(
     coords_list, feats_list, sizes = [], [], []
     labels, pdg, ccnc, itype, energy, vtx, keys = [], [], [], [], [], [], []
     pixel_lists = {k: [] for k in pixel_spec}
+    table_rows = []
 
     for k, (coords, feats, meta) in enumerate(loader):
         coords_list.append(coords)
@@ -176,6 +168,8 @@ def pack_dataset(
                     f"{arr.shape[0]} vs {coords.shape[0]} (key={meta['event_key']})"
                 )
             lst.append(arr)
+        if table_keys:
+            table_rows.append({kk: meta[kk] for kk in table_keys})
 
         if (k + 1) % log_every == 0:
             print(f"  {k + 1}/{n}  (pixels so far: {sum(sizes)})")
@@ -205,8 +199,8 @@ def pack_dataset(
                        if feats_list else np.zeros((0, 1), np.float32))
     feats_list.clear()
     if pixel_spec:
-        out["truth_format"] = TRUTH_FORMAT
-        out["class_names"]  = np.array(CLASS_NAMES)
+        out["truth_format"] = truth.LABEL_FORMAT
+        out["class_names"]  = np.array(truth.CLASS_NAMES)
         for kk, dt in pixel_spec.items():
             arr = (np.concatenate(pixel_lists[kk], axis=0).astype(dt)
                    if pixel_lists[kk] else np.zeros((0,), dt))
@@ -214,6 +208,11 @@ def pack_dataset(
                 f"{kk} total {arr.shape[0]} != offsets[-1] {int(offsets[-1])}")
             out[kk] = arr
             pixel_lists[kk].clear()
+    if table_keys:
+        out.update(truth.stack_tables(table_rows))
+        table_rows.clear()
+        out["vertex_t0_ticks"] = np.float64(vertices.DEFAULT_VERTEX_T0_TICKS)
+        out["vertex_parameters"] = json.dumps(vertices.PARAMETERS)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -243,7 +242,11 @@ def main() -> None:
     parser.add_argument("--no_pixel_truth", action="store_true",
                         help="Skip per-pixel class labels (pixel truth is packed by default)")
     parser.add_argument("--no_extra_truth", action="store_true",
-                        help="Skip energyfrac/trackid/truth_q (packed by default)")
+                        help="Skip energyfrac/trackid/truth_q and the rich tier "
+                             "(packed by default)")
+    parser.add_argument("--no_rich_truth", action="store_true",
+                        help="Skip the 2nd contributor, pixel PDG, vertex truth and the "
+                             "particle tables (packed by default)")
     parser.add_argument("--num_workers", type=int, default=8,
                         help="DataLoader workers for the raw read (default: 8)")
     parser.add_argument("--log_every",  type=int, default=500)
@@ -257,7 +260,8 @@ def main() -> None:
         cache_dir=args.cache_dir,
         n_subset=args.n_subset,
         with_pixel_truth=not args.no_pixel_truth,
-        with_extra_truth=not args.no_extra_truth,
+        with_extra_truth=not (args.no_pixel_truth or args.no_extra_truth),
+        with_rich_truth=not (args.no_pixel_truth or args.no_extra_truth or args.no_rich_truth),
         num_workers=args.num_workers,
         log_every=args.log_every,
     )

@@ -18,11 +18,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from wcfm.data import truth
 from wcfm.data.voxels import Batch, voxels_from
-
-# Per-pixel truth arrays optionally present in a pack (CSR-aligned to coords).
-_PIXEL_KEYS = ("pixel_labels",)
-_EXTRA_KEYS = ("pixel_energyfrac", "pixel_trackid", "pixel_truth_q")
 
 
 class PackedDataset(Dataset):
@@ -34,8 +31,8 @@ class PackedDataset(Dataset):
     present in meta; per-pixel tiers are opt-in flags.
 
     npz members are lazy: np.load reads a zip member only when accessed, so
-    the per-pixel truth baked into the pack costs nothing (RAM or time)
-    unless return_pixel_truth / return_extra_truth is set. Members cannot be
+    the truth baked into the pack costs nothing (RAM or time) unless
+    return_pixel_truth / return_extra_truth / return_rich_truth is set. Members cannot be
     memory-mapped (numpy ignores mmap_mode for zip archives) — a pack is
     loaded fully into RAM, array by array, on first access.
 
@@ -52,12 +49,16 @@ class PackedDataset(Dataset):
         pixel_labels (ΣN,) int8     class labels 0-6 (0=Background/no-truth)
         pixel_energyfrac (ΣN,) f32 · pixel_trackid (ΣN,) i32 (signed)
         pixel_truth_q (ΣN,) f32
+      optional rich truth: the `wcfm.data.truth.RICH_PIXEL` arrays (ΣN,) and
+        per table t, t_offsets (E+1,) and its columns t_<column>
       scalars: apa (int), view (str), truth_format (str)
 
     Args:
         npz_path:           Path to the packed .npz.
         return_pixel_truth: Add pixel_labels to meta (loads the array to RAM).
         return_extra_truth: Add energyfrac/trackid/truth_q to meta as well.
+        return_rich_truth:  Add the rich tier: the 2nd contributor, pixel PDG, vertex
+                            distance and every event's table columns.
     """
 
     def __init__(
@@ -65,14 +66,11 @@ class PackedDataset(Dataset):
         npz_path: str | Path,
         return_pixel_truth: bool = False,
         return_extra_truth: bool = False,
+        return_rich_truth: bool = False,
     ):
         self.npz_path = Path(npz_path)
         if not self.npz_path.exists():
             raise FileNotFoundError(f"Packed dataset not found: {self.npz_path}")
-        if return_extra_truth:
-            return_pixel_truth = True
-        self.return_pixel_truth = return_pixel_truth
-        self.return_extra_truth = return_extra_truth
 
         d = np.load(self.npz_path, allow_pickle=True)
         files = set(d.files)
@@ -99,18 +97,23 @@ class PackedDataset(Dataset):
             np.ascontiguousarray(d["vertex_xyz"])).to(torch.float32)
         self.event_key  = d["event_key"]
 
-        # Optional per-pixel truth — loaded only when requested.
-        self.pixel_truth = {}
-        if return_pixel_truth:
-            wanted = _PIXEL_KEYS + (_EXTRA_KEYS if return_extra_truth else ())
-            missing = set(wanted) - files
-            if missing:
-                raise ValueError(
-                    f"{self.npz_path} has no {sorted(missing)}; re-pack with "
-                    f"the matching --with_pixel_truth/--with_extra_truth flags."
-                )
-            for k in wanted:
-                self.pixel_truth[k] = d[k]
+        # Optional truth — loaded only when requested.
+        self.pixel_keys = tuple(
+            truth.pixel_keys(return_pixel_truth, return_extra_truth, return_rich_truth)
+        )
+        self.tables = bool(return_rich_truth)
+        wanted = self.pixel_keys
+        if self.tables:
+            wanted += truth.TABLE_OFFSETS + tuple(truth.TABLE_COLUMNS)
+        missing = set(wanted) - files
+        if missing:
+            raise ValueError(
+                f"{self.npz_path} has no {sorted(missing)}; re-pack without the matching "
+                f"--no_pixel_truth/--no_extra_truth/--no_rich_truth flag."
+            )
+        self.truth = {k: d[k] for k in wanted}
+        if wanted:
+            self.truth["offsets"] = self.offsets.numpy()
 
         # Provenance / metadata.
         self.apa  = int(d["apa"]) if "apa" in files else None
@@ -144,7 +147,6 @@ class PackedDataset(Dataset):
             "vertex_xyz": self.vertex_xyz[idx].clone(),
             "event_key":  str(self.event_key[idx]),
         }
-        for k, arr in self.pixel_truth.items():
-            meta[k] = arr[a:b]
+        meta.update(truth.event_truth_slice(self.truth, idx, self.pixel_keys, self.tables))
 
         return Batch(vox, meta)

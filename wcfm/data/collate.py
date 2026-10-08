@@ -20,6 +20,7 @@ from typing import Any
 import torch
 from torch import Tensor
 
+from wcfm.data import truth
 from wcfm.data.voxels import Batch, offsets_from_counts, voxels_from
 
 # Event-level truth: one value per image, so a crop does not disturb it.
@@ -30,11 +31,14 @@ _EVENT_PASSTHROUGH = ("event_key",)
 # Per-pixel truth: CSR-aligned to /coords, so cropping and masking DO reorder it. Kept as a
 # per-sample list rather than concatenated, because the consumer that gathers it needs the
 # per-sample boundaries anyway and a flat tensor would hide them.
-_PIXEL = ("pixel_labels", "pixel_energyfrac", "pixel_trackid", "pixel_truth_q")
+_PIXEL = tuple(truth.pixel_keys(True, True, True))
 # Public, because the model's augment stage gathers exactly these along with the pixels a
 # crop or mask selected -- they are CSR-aligned to the coordinates, so a reorder of one is a
 # reorder of the other.
 PIXEL_TRUTH_KEYS = _PIXEL
+# Per-event tables of the rich tier: one array per image, rows that are not pixels, so a crop
+# or mask passes them through untouched.
+_EVENT_TABLES = tuple(truth.TABLE_COLUMNS)
 
 
 def collate(items: Sequence[tuple[Any, dict]]) -> Batch:
@@ -76,7 +80,7 @@ def collate_meta(metas: Sequence[dict]) -> dict[str, Any]:
     for key in _EVENT_PASSTHROUGH:
         if key in first:
             out[key] = [m[key] for m in metas]
-    for key in _PIXEL:
+    for key in _PIXEL + _EVENT_TABLES:
         if key in first:
             out[key] = [m[key] for m in metas]
     return out

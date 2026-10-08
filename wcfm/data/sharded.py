@@ -22,14 +22,13 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
+from wcfm.data import truth
 from wcfm.data.collate import collate_meta
 from wcfm.data.voxels import Batch, offsets_from_counts, voxels_from
 
 # Per-image event-truth datasets (int / float / special-cased below).
 _EVENT_INT_KEYS   = ("labels", "nu_pdg", "nu_ccnc", "nu_intType")
 _EVENT_FLOAT_KEYS = ("nu_energy",)
-# Per-pixel truth datasets (CSR-aligned with /coords via /offsets).
-_PIXEL_KEYS = ("pixel_labels", "pixel_energyfrac", "pixel_trackid", "pixel_truth_q")
 
 
 class ShardedDataset(IterableDataset):
@@ -43,8 +42,8 @@ class ShardedDataset(IterableDataset):
     step.
 
     Event-level truth is returned automatically when the shards carry it.
-    Per-pixel tiers are opt-in (return_pixel_truth / return_extra_truth,
-    same API as DirectDataset / PackedDataset) because HDF5
+    The `wcfm.data.truth` tiers are opt-in (return_pixel_truth / return_extra_truth /
+    return_rich_truth, same API as DirectDataset / PackedDataset) because HDF5
     datasets present in a shard are decompressed on every read — training
     should leave them off even on full-truth shard sets.
 
@@ -56,6 +55,7 @@ class ShardedDataset(IterableDataset):
                     vertex_xyz                      → FloatTensor[B, 3]
                     event_key                       → list[str]
                     pixel_labels / pixel_*          → list of B np.ndarray[N_i]
+                    mcpart_* / simchnl_* / vertex_* → list of B np.ndarray (rich tier)
                 {} when the shards carry no truth datasets.
 
     Use with DataLoader(batch_size=None, ...) to disable PyTorch auto-batching.
@@ -99,6 +99,7 @@ class ShardedDataset(IterableDataset):
         shuffle: bool = True,
         return_pixel_truth: bool = False,
         return_extra_truth: bool = False,
+        return_rich_truth: bool = False,
         n_subset: int = -1,
         rank: int = 0,
         world_size: int = 1,
@@ -123,10 +124,10 @@ class ShardedDataset(IterableDataset):
         self.epoch = 0
         self.buffer_size = buffer_size
         self.shuffle = shuffle
-        if return_extra_truth:
-            return_pixel_truth = True
-        self.return_pixel_truth = return_pixel_truth
-        self.return_extra_truth = return_extra_truth
+        self._pixel_keys = tuple(
+            truth.pixel_keys(return_pixel_truth, return_extra_truth, return_rich_truth)
+        )
+        self._tables = bool(return_rich_truth)
 
         self.shards: list[Path] = sorted(self.root_dir.glob("shard_*.h5"))
         if not self.shards:
@@ -192,20 +193,18 @@ class ShardedDataset(IterableDataset):
         # returned when present.
         with h5py.File(self.shards[0], "r") as f:
             self._has_event_truth = "labels" in f
-            available = tuple(k for k in _PIXEL_KEYS if k in f)
-        wanted = []
-        if self.return_pixel_truth:
-            wanted.append("pixel_labels")
-        if self.return_extra_truth:
-            wanted += ["pixel_energyfrac", "pixel_trackid", "pixel_truth_q"]
-        missing = [k for k in wanted if k not in available]
+            wanted = self._pixel_keys + (self._table_keys() if self._tables else ())
+            missing = [k for k in wanted if k not in f]
         if missing:
             raise ValueError(
                 f"{root_dir}: shards have no {missing}; rebuild with "
                 f"`python -m wcfm.data.prep.create_shards` and the matching "
-                f"--with_pixel_truth/--with_extra_truth flags."
+                f"--with_pixel_truth/--with_extra_truth/--with_rich_truth flags."
             )
-        self._pixel_keys: tuple[str, ...] = tuple(wanted)
+
+    @staticmethod
+    def _table_keys() -> tuple[str, ...]:
+        return truth.TABLE_OFFSETS + tuple(truth.TABLE_COLUMNS)
 
     # ------------------------------------------------------------------
     # IterableDataset protocol
@@ -332,14 +331,16 @@ class ShardedDataset(IterableDataset):
                     event[k] = f[k][()]
                 event["vertex_xyz"] = f["vertex_xyz"][()]
                 event["event_key"]  = f["event_key"][()]
-            pixel = {k: f[k][()] for k in self._pixel_keys}
+            store = {"offsets": offsets.numpy()}
+            for k in self._pixel_keys + (self._table_keys() if self._tables else ()):
+                store[k] = f[k][()]
 
         samples = []
         for i in range(len(offsets) - 1):
             s, e = int(offsets[i]), int(offsets[i + 1])
 
             meta_row = None
-            if self._has_event_truth or pixel:
+            if self._has_event_truth or self._pixel_keys:
                 meta_row = {}
                 if self._has_event_truth:
                     for k in _EVENT_INT_KEYS:
@@ -350,8 +351,7 @@ class ShardedDataset(IterableDataset):
                     if isinstance(ev_key, (bytes, np.bytes_)):
                         ev_key = ev_key.decode("utf-8")
                     meta_row["event_key"] = ev_key
-                for k, arr in pixel.items():
-                    meta_row[k] = arr[s:e]
+                meta_row.update(truth.event_truth_slice(store, i, self._pixel_keys, self._tables))
 
             samples.append((coords[s:e].clone(), feats[s:e].clone(), meta_row))
         return samples

@@ -5,10 +5,16 @@ sample and reads them on demand, one file open per sample, which is slow on GPFS
 legacy option and not recommended for training. The functions above it parse one event out
 of an open file and are shared with `wcfm.data.prep.create_shards`, which reads whole files
 instead, so a shard set is the production exactly as this reader sees it.
+
+An event is one group of a `*_pixeldata-anode<apa>.h5`. Its event truth is in the
+`*_metadata.h5` beside it, and the particle lists the rich tier stores are in the
+`*_trackid_pid_map.h5` beside it. Per-pixel labels (`frame_label_*`, `<event>/mcpart/labels`)
+are not simulation output: a labeller writes them into the files before they are read here.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import warnings
@@ -21,7 +27,10 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from wcfm.data import truth
+from wcfm.data.vertices import DEFAULT_VERTEX_T0_TICKS, DIST_CLIP, vertex_truth
 from wcfm.data.voxels import Batch, voxels_from
+from wcfm.data.wire_geometry import WireGeometry
 
 # Default channel ranges for each wire-plane view.
 # Channels 0-799 -> U plane, 800-1599 -> V plane, 1600-2649 -> W plane.
@@ -33,12 +42,46 @@ DEFAULT_VIEW_RANGES: dict[str, tuple[int, int]] = {
 
 FRAME_NAME = "frame_rebinned_reco"
 
-# Extra per-pixel truth frames: meta key -> (HDF5 frame name, output dtype). Track ids can be
-# positive or negative (negative = G4-dropped secondary of parent abs(id)); both are kept as-is.
-EXTRA_TRUTH_FRAMES = {
-    "pixel_energyfrac": ("frame_energyfrac_1st", np.float32),
-    "pixel_trackid": ("frame_trackid_1st", np.int32),
-    "pixel_truth_q": ("frame_total_numelectrons", np.float32),
+# Per-pixel truth: meta key -> sparse HDF5 frame. Every frame is stored as float; integer keys
+# are rounded on read. Track ids can be negative (a G4-dropped particle; its parent is abs(id))
+# and are kept as stored.
+TRUTH_FRAMES = {
+    "pixel_labels": "frame_label_1st",
+    "pixel_energyfrac": "frame_energyfrac_1st",
+    "pixel_trackid": "frame_trackid_1st",
+    "pixel_truth_q": "frame_total_numelectrons",
+    "pixel_labels2": "frame_label_2nd",
+    "pixel_trackid2": "frame_trackid_2nd",
+    "pixel_energyfrac2": "frame_energyfrac_2nd",
+}
+
+# Table column -> dataset under `<event>/<table>` in the trackid_pid_map file.
+TABLE_SOURCES = {
+    "mcpart": {
+        "trackid": "track_ids",
+        "pid": "pids",
+        "motherid": "mother_ids",
+        "mother_pid": "mother_pids",
+        "proc": "processes",
+        "endproc": "end_processes",
+        "status": "statuses",
+        "ndaughters": "ndaughters",
+        "ntrajpts": "ntrajpts",
+        "label": "labels",
+        "mass": "masses",
+        "start_xyzt": "start_xyzts",
+        "end_xyzt": "end_xyzts",
+        "start_mom": "start_moms",
+        "end_mom": "end_moms",
+    },
+    "simchnl": {
+        "trackid": "track_ids",
+        "pid": "pids",
+        "motherid": "mother_ids",
+        "mother_pid": "mother_pids",
+        "proc": "processes",
+        "energy": "energies",
+    },
 }
 
 
@@ -51,14 +94,15 @@ def view_range(view: str, view_ranges: dict[str, tuple[int, int]] | None = None)
     return ranges[view]
 
 
-def metadata_path(pixeldata_path: Path, apa: int) -> Path:
-    """The `_metadata.h5` beside a `_pixeldata-anode<apa>.h5` (or older `_anode<apa>.h5`)."""
+def companion_path(pixeldata_path: Path, apa: int, kind: str) -> Path:
+    """The `_<kind>.h5` beside a `_pixeldata-anode<apa>.h5` (or older `_anode<apa>.h5`):
+    `kind` is `metadata` or `trackid_pid_map`."""
     suffix = f"_pixeldata-anode{apa}.h5"
     if pixeldata_path.name.endswith(suffix):
         basename = pixeldata_path.name[: -len(suffix)]
     else:
         basename = pixeldata_path.stem
-    return pixeldata_path.parent / f"{basename}_metadata.h5"
+    return pixeldata_path.parent / f"{basename}_{kind}.h5"
 
 
 def is_sparse_frame(group: h5py.Group) -> bool:
@@ -132,83 +176,156 @@ def event_truth(
         return unknown_truth(event_key)
 
 
-def empty_pixel_truth(n: int, extra: bool) -> dict:
-    """All-fill pixel truth of length n (label 0 = Background/no-truth)."""
-    out = {"pixel_labels": np.zeros(n, dtype=np.int8)}
-    if extra:
-        for key, (_, dtype) in EXTRA_TRUTH_FRAMES.items():
-            out[key] = np.zeros(n, dtype=dtype)
-    return out
-
-
 def pixel_truth(
     group: h5py.Group,
     reco_coords: np.ndarray,
     ch_start: int,
     ch_end: int,
-    extra: bool,
+    keys: dict[str, type],
     warn: Callable[[str], None],
 ) -> dict:
-    """Per-pixel truth aligned to the view-filtered reco pixel order of `reco_coords` (the
-    unfiltered `(N, 2)` frame coords). `pixel_labels` from `frame_label_1st` and, with
-    `extra`, the `EXTRA_TRUTH_FRAMES`; reco pixels with no truth hit carry the fill value."""
+    """The `TRUTH_FRAMES` among `keys`, aligned to the view-filtered reco pixel order of
+    `reco_coords` (the unfiltered `(N, 2)` frame coords). A reco pixel a frame has no hit on
+    carries 0. Truth hits sit on reco pixels only, so the alignment drops none."""
     mask_reco = (reco_coords[:, 0] >= ch_start) & (reco_coords[:, 0] < ch_end)
     reco_view = reco_coords[mask_reco]
-    n_view = int(mask_reco.sum())
-
+    out = {k: np.zeros(len(reco_view), dtype=dt) for k, dt in keys.items() if k in TRUTH_FRAMES}
     if "frame_label_1st" not in group:
         warn(
             f"frame_label_1st not found in {group.file.filename}[{group.name}]; pixel truth "
-            "defaults to 0 (Background). Pre-2026-06-11 productions (frame_pid_*) are not "
-            "supported."
+            "defaults to 0 (Background). Label the production before reading it."
         )
-        return empty_pixel_truth(n_view, extra)
-
-    label_coords = group["frame_label_1st"]["coords"][()]
-    label_feats = group["frame_label_1st"]["features"][()]
-    mask_lbl = (label_coords[:, 0] >= ch_start) & (label_coords[:, 0] < ch_end)
-    lbl_view_coords = label_coords[mask_lbl]
-    lbl_view_feats = label_feats[mask_lbl]
-
-    # Map each reco pixel to its row in the view-filtered truth frame.
-    row_lookup = {(int(c[0]), int(c[1])): i for i, c in enumerate(lbl_view_coords)}
-    rows = np.array([row_lookup.get((int(c[0]), int(c[1])), -1) for c in reco_view], dtype=np.int64)
-    has = rows >= 0
-
-    out = empty_pixel_truth(n_view, extra)
-    out["pixel_labels"][has] = lbl_view_feats[rows[has]].astype(np.int8)
-    if not extra:
         return out
 
-    for key, (frame, dtype) in EXTRA_TRUTH_FRAMES.items():
+    rows_by_coords: dict[bytes, np.ndarray] = {}
+    for key in out:
+        frame = TRUTH_FRAMES[key]
         if frame not in group:
             warn(f"{frame} not found in {group.file.filename}; {key} defaults to 0.")
             continue
         coords_f = group[frame]["coords"][()]
         feats_f = group[frame]["features"][()]
         m = (coords_f[:, 0] >= ch_start) & (coords_f[:, 0] < ch_end)
-        f_view_coords, f_view_feats = coords_f[m], feats_f[m]
-        # All truth frames share coords by construction (the classify script reuses the
-        # frame_trackid coords), so the label lookup is reused when that holds.
-        if f_view_coords.shape == lbl_view_coords.shape and np.array_equal(
-            f_view_coords, lbl_view_coords
-        ):
-            f_rows, f_has = rows, has
-        else:
-            warn(
-                f"{frame} coords differ from frame_label_1st in {group.file.filename}; "
-                "using a per-frame lookup."
+        f_coords, f_feats = coords_f[m], feats_f[m]
+        # The frames of one contributor slot share coords, so their row lookup is built once.
+        rows = rows_by_coords.get(f_coords.tobytes())
+        if rows is None:
+            lookup = {(int(c[0]), int(c[1])): i for i, c in enumerate(f_coords)}
+            rows = np.array(
+                [lookup.get((int(c[0]), int(c[1])), -1) for c in reco_view], dtype=np.int64
             )
-            lk = {(int(c[0]), int(c[1])): i for i, c in enumerate(f_view_coords)}
-            f_rows = np.array(
-                [lk.get((int(c[0]), int(c[1])), -1) for c in reco_view], dtype=np.int64
-            )
-            f_has = f_rows >= 0
-        vals = f_view_feats[f_rows[f_has]]
-        if np.issubdtype(dtype, np.integer) and vals.dtype.kind == "f":
+            rows_by_coords[f_coords.tobytes()] = rows
+        has = rows >= 0
+        vals = f_feats[rows[has]]
+        if np.issubdtype(out[key].dtype, np.integer) and vals.dtype.kind == "f":
             vals = np.rint(vals)
-        out[key][f_has] = vals.astype(dtype)
+        out[key][has] = vals.astype(out[key].dtype)
     return out
+
+
+def read_tables(trackmap: h5py.Group | None, where: str, warn: Callable[[str], None]) -> dict:
+    """The event's `mcpart` and `simchnl` table columns from its trackid_pid_map group. A
+    missing table or column is empty or zero-filled, with a warning."""
+    out: dict[str, np.ndarray] = {}
+    for t, sources in TABLE_SOURCES.items():
+        grp = trackmap[t] if trackmap is not None and t in trackmap else None
+        if grp is None:
+            warn(f"no {t} table for {where}; it is stored empty.")
+        n = len(grp[sources["trackid"]]) if grp is not None else 0
+        for c, src in sources.items():
+            name = f"{t}_{c}"
+            if grp is not None and src in grp:
+                out[name] = grp[src][()].astype(truth.TABLE_COLUMNS[name][1])
+            else:
+                if grp is not None:
+                    warn(f"{t}/{src} not found for {where}; {name} defaults to 0.")
+                out[name] = truth.empty_table_column(name, n)
+    return out
+
+
+def rich_truth(
+    tables: dict[str, np.ndarray],
+    vertex_xyz: np.ndarray,
+    coords: np.ndarray,
+    pixel_trackid: np.ndarray,
+    *,
+    geom: WireGeometry,
+    apa: int,
+    view: str,
+) -> dict:
+    """`pixel_pdg`, `pixel_vertex_dist` and the `vertex_*` columns of one event, from its
+    tables and this view's reco pixels (`coords`, channel rebased) and their track ids.
+
+    `pixel_pdg` looks a track id up in `simchnl`, then `mcpart`, then takes the PDG of its
+    parent `abs(id)`: `simchnl` is the only list holding the G4-dropped particles."""
+    pdg = dict(zip(tables["mcpart_trackid"].tolist(), tables["mcpart_pid"].tolist(), strict=True))
+    pdg.update(zip(tables["simchnl_trackid"].tolist(), tables["simchnl_pid"].tolist(), strict=True))
+    pixel_pdg = np.array(
+        [pdg.get(t, pdg.get(abs(t), 0)) if t else 0 for t in pixel_trackid.tolist()], np.int32
+    )
+    if len(tables["mcpart_trackid"]) == 0:
+        empty = {k: truth.empty_table_column(k) for k in truth.TABLE_COLUMNS if k[:7] == "vertex_"}
+        return {
+            "pixel_pdg": pixel_pdg,
+            "pixel_vertex_dist": np.full(len(coords), DIST_CLIP, np.float32),
+            **empty,
+        }
+    mcpart = {c: tables[f"mcpart_{c}"] for c in truth.TABLES["mcpart"]}
+    vertex, dist = vertex_truth(
+        mcpart, vertex_xyz, coords, pixel_trackid, geom=geom, apa=apa, view=view
+    )
+    return {"pixel_pdg": pixel_pdg, "pixel_vertex_dist": dist, **vertex}
+
+
+def read_event(
+    grp: h5py.Group,
+    group: str,
+    key: str,
+    *,
+    metadata: h5py.File | None,
+    trackmap: h5py.File | None,
+    ch_start: int,
+    ch_end: int,
+    keys: dict[str, type],
+    rich: bool,
+    geom: WireGeometry | None,
+    apa: int,
+    view: str,
+    warn: Callable[[str], None],
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """One event: its view-filtered `(N, 2)` coords and `(N, 1)` features, and a meta dict of
+    event truth plus the per-pixel `keys` and, with `rich`, the table columns.
+
+    `metadata` and `trackmap` are the open companion files, None when absent. `geom` is
+    needed with `rich` only."""
+    raw_coords = grp[FRAME_NAME]["coords"][()]
+    raw_feats = grp[FRAME_NAME]["features"][()]
+    coords, feats = select_view(raw_coords, raw_feats, ch_start, ch_end)
+    meta = event_truth(metadata, group, key, warn)
+    if keys:
+        meta.update(pixel_truth(grp, raw_coords, ch_start, ch_end, keys, warn))
+    if rich:
+        tables = read_tables(
+            trackmap[group] if trackmap is not None and group in trackmap else None, key, warn
+        )
+        meta.update(tables)
+        meta.update(
+            rich_truth(
+                tables,
+                meta["vertex_xyz"],
+                coords,
+                meta["pixel_trackid"],
+                geom=geom,
+                apa=apa,
+                view=view,
+            )
+        )
+    return coords, feats, meta
+
+
+def load_geometry() -> WireGeometry:
+    """The wire geometry the rich tier projects vertices with, at the measured tick offset."""
+    return WireGeometry.load(t0_ticks=DEFAULT_VERTEX_T0_TICKS)
 
 
 @dataclass(frozen=True)
@@ -226,8 +343,9 @@ class DirectDataset(Dataset):
     sparse sample, keeps a single wire-plane view, and caches the file index to disk keyed by a
     hash of the resolved root so two datasets never share a cache file.
 
-    `__getitem__` returns `Batch(voxels, meta)`. Event-level truth is always present. Per-pixel
-    truth is opt-in, because HDF5 decompresses it on every read.
+    `__getitem__` returns `Batch(voxels, meta)`. Event-level truth is always present. The
+    `wcfm.data.truth` tiers are opt-in, because HDF5 decompresses them on every read; each
+    implies the ones before it.
     """
 
     def __init__(
@@ -238,13 +356,12 @@ class DirectDataset(Dataset):
         use_cache: bool = True,
         cache_dir: str | Path = "./data",
         view_ranges: dict[str, tuple[int, int]] | None = None,
-        frame_name: str = FRAME_NAME,
         return_pixel_truth: bool = False,
         return_extra_truth: bool = False,
+        return_rich_truth: bool = False,
     ):
         self.datadir = Path(datadir)
         self.apa = int(apa)
-        self.frame_name = frame_name
         self.view = view.upper()
         self.ch_start, self.ch_end = view_range(view, view_ranges)
 
@@ -259,8 +376,11 @@ class DirectDataset(Dataset):
             self.cache_dir / f"DirectDataset_APA{self.apa}_view{self.view}_{root_hash}_cache.pt"
         )
 
-        self.return_pixel_truth = return_pixel_truth or return_extra_truth
-        self.return_extra_truth = return_extra_truth
+        self.truth_keys = truth.pixel_keys(
+            return_pixel_truth, return_extra_truth, return_rich_truth
+        )
+        self.return_rich_truth = return_rich_truth
+        self.geom = load_geometry() if return_rich_truth else None
         self._warned: set[str] = set()
 
         self.samples: list[SampleIndex] = self._scan()
@@ -316,33 +436,31 @@ class DirectDataset(Dataset):
     def __getitem__(self, idx: int) -> Batch:
         s = self.samples[idx]
         event_key = f"{s.path.name}:{s.group}"
-
-        with h5py.File(s.path, "r") as f:
-            grp = f[s.group]
-            raw_coords = grp[self.frame_name]["coords"][()]
-            raw_feats = grp[self.frame_name]["features"][()]
-            coords, feats = select_view(raw_coords, raw_feats, self.ch_start, self.ch_end)
-            pixel = (
-                pixel_truth(
-                    grp,
-                    raw_coords,
-                    self.ch_start,
-                    self.ch_end,
-                    self.return_extra_truth,
-                    self._warn_once,
-                )
-                if self.return_pixel_truth
-                else {}
+        mpath = companion_path(s.path, self.apa, "metadata")
+        tpath = companion_path(s.path, self.apa, "trackid_pid_map")
+        with contextlib.ExitStack() as stack:
+            f = stack.enter_context(h5py.File(s.path, "r"))
+            metadata = stack.enter_context(h5py.File(mpath, "r")) if mpath.exists() else None
+            trackmap = (
+                stack.enter_context(h5py.File(tpath, "r"))
+                if self.return_rich_truth and tpath.exists()
+                else None
             )
-
-        mpath = metadata_path(s.path, self.apa)
-        if mpath.exists():
-            with h5py.File(mpath, "r") as m:
-                meta = event_truth(m, s.group, event_key, self._warn_once)
-        else:
-            meta = event_truth(None, s.group, event_key, self._warn_once)
+            coords, feats, meta = read_event(
+                f[s.group],
+                s.group,
+                event_key,
+                metadata=metadata,
+                trackmap=trackmap,
+                ch_start=self.ch_start,
+                ch_end=self.ch_end,
+                keys=self.truth_keys,
+                rich=self.return_rich_truth,
+                geom=self.geom,
+                apa=self.apa,
+                view=self.view,
+                warn=self._warn_once,
+            )
         meta["vertex_xyz"] = torch.from_numpy(meta["vertex_xyz"])
-        meta.update(pixel)
-
         offsets = torch.tensor([0, coords.shape[0]], dtype=torch.int64)
         return Batch(voxels_from(torch.from_numpy(coords), torch.from_numpy(feats), offsets), meta)

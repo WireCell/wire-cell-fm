@@ -67,6 +67,7 @@ def build_dataset(
         raise ValueError(f"data.epoch_split is read by the sharded backend only, not {backend!r}")
     pixel = bool(getattr(cfg, "return_pixel_truth", False))
     extra = bool(getattr(cfg, "return_extra_truth", False))
+    rich = bool(getattr(cfg, "return_rich_truth", False))
 
     if backend == "direct":
         from wcfm.data.direct import DirectDataset
@@ -79,6 +80,7 @@ def build_dataset(
                 cache_dir=cfg.cache_dir,
                 return_pixel_truth=pixel,
                 return_extra_truth=extra,
+                return_rich_truth=rich,
             ),
             cfg.n_subset,
             seed,
@@ -88,7 +90,10 @@ def build_dataset(
 
         return subset(
             PackedDataset(
-                cfg.packed_path, return_pixel_truth=pixel, return_extra_truth=extra
+                cfg.packed_path,
+                return_pixel_truth=pixel,
+                return_extra_truth=extra,
+                return_rich_truth=rich,
             ),
             cfg.n_subset,
             seed,
@@ -109,6 +114,7 @@ def build_dataset(
             epoch_split=epoch_split,
             return_pixel_truth=pixel,
             return_extra_truth=extra,
+            return_rich_truth=rich,
         )
     raise ValueError(f"unknown data.backend {backend!r}; expected one of {BACKENDS}")
 

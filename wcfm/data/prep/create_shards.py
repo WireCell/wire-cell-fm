@@ -25,9 +25,16 @@ HDF5 layout per shard file:
     /pixel_energyfrac (N_pix,) float32 -- truth-overlap score (frame_energyfrac_1st)
     /pixel_trackid    (N_pix,) int32   -- truth track id, signed (frame_trackid_1st)
     /pixel_truth_q    (N_pix,) float32 -- truth charge (frame_total_numelectrons)
+  with --with_rich_truth additionally (`wcfm.data.truth` lists every key):
+    /pixel_labels2, /pixel_trackid2, /pixel_energyfrac2 (N_pix,) -- the 2nd contributor
+    /pixel_pdg         (N_pix,) int32   -- PDG of the particle pixel_trackid names
+    /pixel_vertex_dist (N_pix,) float32 -- distance to the nearest vertex in this view (px)
+    /mcpart_offsets (N_img+1,) int64 and /mcpart_<column> -- the event's stored particles
+    /simchnl_offsets (N_img+1,) int64 and /simchnl_<column> -- the particles that left charge
+    /vertex_offsets (N_img+1,) int64 and /vertex_<column> -- its vertices (`wcfm.data.vertices`)
 
-A metadata.json alongside records the roots, apa, view, n_samples, shard_size, seed and which
-truth tiers are present.
+A metadata.json alongside records the roots, apa, view, n_samples, shard_size, seed, which
+truth tiers are present and, with the rich tier, the vertex definition and tick offset.
 
 How the production is read. A cold file on GPFS costs a few hundred milliseconds whatever is
 read from it, and the pool tolerates dozens of concurrent readers, so every source file is
@@ -57,12 +64,13 @@ Usage:
         --outdir /path/to/shards \\
         [--shard_size 4000] [--seed 42] [--block_files 10000]
         [--threads 32] [--writers 4]
-        [--with_pixel_truth] [--with_extra_truth]
+        [--with_pixel_truth] [--with_extra_truth] [--with_rich_truth]
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ctypes
 import io
 import json
@@ -77,21 +85,15 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from wcfm.data import truth, vertices
 from wcfm.data.direct import (
-    EXTRA_TRUTH_FRAMES,
-    FRAME_NAME,
-    event_truth,
+    companion_path,
     is_sparse_frame,
-    metadata_path,
-    pixel_truth,
-    select_view,
+    load_geometry,
+    read_event,
     view_range,
 )
-
-LABEL_FORMAT = "classes7_v1"
-CLASS_NAMES = ["Background", "Track", "Shower", "Michel", "DeltaRay", "Blip", "Other"]
-
-EXTRA_TRUTH_KEYS = {k: dtype for k, (_, dtype) in EXTRA_TRUTH_FRAMES.items()}
+from wcfm.data.wire_geometry import WireGeometry
 
 # One event as read: view-filtered coords (N, 2) int32, features (N, 1) float32, and the meta
 # dict from `event_truth` plus any pixel-truth arrays.
@@ -123,36 +125,56 @@ def _group_key(name: str) -> tuple[int, str]:
     return (int(name), "") if name.isdigit() else (1 << 30, name)
 
 
+def _open_whole(path: Path, stack: contextlib.ExitStack) -> h5py.File | None:
+    """`path` read with one sequential read and opened in memory; None when it is absent."""
+    if not path.exists():
+        return None
+    return stack.enter_context(h5py.File(io.BytesIO(path.read_bytes()), "r"))
+
+
 def read_file(
-    pix_path: Path, apa: int, ch_start: int, ch_end: int, with_pixel_truth: bool, extra: bool
+    pix_path: Path,
+    apa: int,
+    view: str,
+    keys: dict[str, type],
+    rich: bool,
+    geom: WireGeometry | None,
 ) -> list[Event]:
     """Every sparse event of one pixel file, view-filtered, with its truth. The file and its
-    metadata file are each read whole with one sequential read and parsed in memory."""
-    mpath = metadata_path(pix_path, apa)
-    mbytes = mpath.read_bytes() if mpath.exists() else None
+    companions are each read whole with one sequential read and parsed in memory."""
+    ch_start, ch_end = view_range(view)
     events: list[Event] = []
-    with h5py.File(io.BytesIO(pix_path.read_bytes()), "r") as f:
-        meta_file = h5py.File(io.BytesIO(mbytes), "r") if mbytes is not None else None
-        try:
-            for group in sorted(f.keys(), key=_group_key):
-                grp = f[group]
-                if not isinstance(grp, h5py.Group) or not is_sparse_frame(grp):
-                    continue
-                raw_coords = grp[FRAME_NAME]["coords"][()]
-                raw_feats = grp[FRAME_NAME]["features"][()]
-                coords, feats = select_view(raw_coords, raw_feats, ch_start, ch_end)
-                key = f"{pix_path.name}:{group}"
-                meta = event_truth(meta_file, group, key, _warn_once)
-                if with_pixel_truth:
-                    meta.update(pixel_truth(grp, raw_coords, ch_start, ch_end, extra, _warn_once))
-                events.append((coords, feats, meta))
-        finally:
-            if meta_file is not None:
-                meta_file.close()
+    with contextlib.ExitStack() as stack:
+        f = _open_whole(pix_path, stack)
+        metadata = _open_whole(companion_path(pix_path, apa, "metadata"), stack)
+        trackmap = (
+            _open_whole(companion_path(pix_path, apa, "trackid_pid_map"), stack) if rich else None
+        )
+        for group in sorted(f.keys(), key=_group_key):
+            grp = f[group]
+            if not isinstance(grp, h5py.Group) or not is_sparse_frame(grp):
+                continue
+            events.append(
+                read_event(
+                    grp,
+                    group,
+                    f"{pix_path.name}:{group}",
+                    metadata=metadata,
+                    trackmap=trackmap,
+                    ch_start=ch_start,
+                    ch_end=ch_end,
+                    keys=keys,
+                    rich=rich,
+                    geom=geom,
+                    apa=apa,
+                    view=view,
+                    warn=_warn_once,
+                )
+            )
     return events
 
 
-def assemble(events: list[Event], pixel_keys: tuple[str, ...]) -> dict[str, np.ndarray]:
+def assemble(events: list[Event], keys: dict[str, type], rich: bool) -> dict[str, np.ndarray]:
     """The flat arrays of one shard, in the layout the module docstring lists."""
     coords = [c for c, _, _ in events]
     offsets = np.zeros(len(events) + 1, dtype=np.int64)
@@ -169,13 +191,14 @@ def assemble(events: list[Event], pixel_keys: tuple[str, ...]) -> dict[str, np.n
         "vertex_xyz": np.stack([m["vertex_xyz"] for _, _, m in events]).astype(np.float32),
         "event_key": np.array([m["event_key"].encode("utf-8") for _, _, m in events], dtype=object),
     }
-    for k in pixel_keys:
-        dtype = np.int8 if k == "pixel_labels" else EXTRA_TRUTH_KEYS[k]
+    for k, dtype in keys.items():
         parts = [m[k] for _, _, m in events]
         assert all(len(p) == len(c) for p, c in zip(parts, coords, strict=True)), (
             f"{k} length differs from coords in shard"
         )
         out[k] = np.concatenate(parts, axis=0).astype(dtype)
+    if rich:
+        out.update(truth.stack_tables([m for _, _, m in events]))
     return out
 
 
@@ -188,7 +211,7 @@ def write_shard(path: Path, arrays: dict[str, np.ndarray]) -> tuple[str, int, in
     per write call, and a shard is a few hundred compressed chunks. Cluster 348 spent 18 min
     per block writing straight to GPFS against about 2 min of compression.
     """
-    per_pixel = {"coords", "features", "pixel_labels", *EXTRA_TRUTH_KEYS}
+    per_pixel = {"coords", "features", *truth.pixel_keys(True, True, True), *truth.TABLE_COLUMNS}
     with tempfile.TemporaryDirectory(prefix="shard_") as tmpdir:
         local = Path(tmpdir) / path.name
         with h5py.File(local, "w") as hf:
@@ -234,11 +257,11 @@ def _prefork(pool: ProcessPoolExecutor, n: int) -> None:
     wait([pool.submit(time.sleep, 0.5) for _ in range(n)])
 
 
-def _save_carry(path: Path, events: list[Event], pixel_keys: tuple[str, ...]) -> None:
+def _save_carry(path: Path, events: list[Event], keys: dict[str, type], rich: bool) -> None:
     if not events:
         path.unlink(missing_ok=True)
         return
-    arrays = assemble(events, pixel_keys)
+    arrays = assemble(events, keys, rich)
     arrays["event_key"] = arrays["event_key"].astype("S")
     tmp = path.with_suffix(".npz.tmp")
     with open(tmp, "wb") as fp:
@@ -246,7 +269,7 @@ def _save_carry(path: Path, events: list[Event], pixel_keys: tuple[str, ...]) ->
     tmp.replace(path)
 
 
-def _load_carry(path: Path, pixel_keys: tuple[str, ...]) -> list[Event]:
+def _load_carry(path: Path, keys: dict[str, type], rich: bool) -> list[Event]:
     if not path.exists():
         return []
     with np.load(path, allow_pickle=False) as z:
@@ -263,8 +286,7 @@ def _load_carry(path: Path, pixel_keys: tuple[str, ...]) -> list[Event]:
             "vertex_xyz": a["vertex_xyz"][i],
             "event_key": a["event_key"][i].decode("utf-8"),
         }
-        for k in pixel_keys:
-            meta[k] = a[k][s:e]
+        meta.update(truth.event_truth_slice(a, i, tuple(keys), rich))
         events.append((a["coords"][s:e], a["features"][s:e], meta))
     return events
 
@@ -281,13 +303,12 @@ def create_shards(
     writers: int = 4,
     with_pixel_truth: bool = False,
     with_extra_truth: bool = False,
+    with_rich_truth: bool = False,
 ) -> None:
-    if with_extra_truth:
-        with_pixel_truth = True
-    pixel_keys = (("pixel_labels",) if with_pixel_truth else ()) + (
-        tuple(EXTRA_TRUTH_KEYS) if with_extra_truth else ()
-    )
-    ch_start, ch_end = view_range(view)
+    keys = truth.pixel_keys(with_pixel_truth, with_extra_truth, with_rich_truth)
+    view_range(view)  # an unknown view raises here, not once per file in the reader threads
+    # Loaded here, before the reader threads start: a first load writes the geometry cache.
+    geom = load_geometry() if with_rich_truth else None
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -319,8 +340,9 @@ def create_shards(
         "seed": int(seed),
         "shard_size": int(shard_size),
         "block_files": int(block_files),
-        "pixel_truth": bool(with_pixel_truth),
-        "extra_truth": bool(with_extra_truth),
+        "pixel_truth": "pixel_labels" in keys,
+        "extra_truth": "pixel_trackid" in keys,
+        "rich_truth": bool(with_rich_truth),
     }
     state_path, carry_path = outdir / "state.json", outdir / "carry.npz"
     for tmp in outdir.glob("shard_*.h5.tmp"):
@@ -338,7 +360,7 @@ def create_shards(
             f"  Resuming: {state['next_block']}/{len(blocks)} blocks done, "
             f"{state['next_shard']} shards, {state['n_written']} events written."
         )
-    carry = _load_carry(carry_path, pixel_keys)
+    carry = _load_carry(carry_path, keys, with_rich_truth)
 
     def write_metadata(n_samples: int, n_shards: int) -> None:
         meta_out = {
@@ -347,14 +369,21 @@ def create_shards(
             "n_shards": n_shards,
             "pixel_truth": signature["pixel_truth"],
             "extra_truth": signature["extra_truth"],
-            "label_format": LABEL_FORMAT,
-            "class_names": CLASS_NAMES,
+            "rich_truth": signature["rich_truth"],
+            "label_format": truth.LABEL_FORMAT,
+            "class_names": truth.CLASS_NAMES,
         }
+        if with_rich_truth:
+            meta_out["vertex"] = {
+                **vertices.PARAMETERS,
+                "t0_ticks": vertices.DEFAULT_VERTEX_T0_TICKS,
+                "type_names": vertices.VERTEX_TYPE_NAMES,
+            }
         _write_text(outdir / "metadata.json", json.dumps(meta_out, indent=2))
 
     def read_one(fp: Path) -> list[Event]:
         try:
-            return read_file(fp, apa, ch_start, ch_end, with_pixel_truth, with_extra_truth)
+            return read_file(fp, apa, view, keys, with_rich_truth, geom)
         except Exception as e:  # noqa: BLE001 - one unreadable file must not end the run
             _warn_once(f"skipping {fp}: {e}")
             return []
@@ -383,7 +412,7 @@ def create_shards(
             pending: list = []
             for k in range(n_full):
                 lo, hi = k * shard_size, (k + 1) * shard_size
-                arrays = assemble(events[lo:hi], pixel_keys)
+                arrays = assemble(events[lo:hi], keys, with_rich_truth)
                 events[lo:hi] = [None] * shard_size
                 path = outdir / f"shard_{state['next_shard'] + k:05d}.h5"
                 pending.append(pool.submit(write_shard, path, arrays))
@@ -402,13 +431,13 @@ def create_shards(
                 "next_shard": state["next_shard"] + n_full,
                 "n_written": state["n_written"] + n_full * shard_size,
             }
-            _save_carry(carry_path, carry, pixel_keys)
+            _save_carry(carry_path, carry, keys, with_rich_truth)
             write_metadata(state["n_written"], state["next_shard"])
             _write_text(state_path, json.dumps({"signature": signature, "state": state}, indent=2))
 
         if carry:
             path = outdir / f"shard_{state['next_shard']:05d}.h5"
-            name, n_pix, n_img = write_shard(path, assemble(carry, pixel_keys))
+            name, n_pix, n_img = write_shard(path, assemble(carry, keys, with_rich_truth))
             print(f"    wrote {name}  ({n_pix} pixels, {n_img} images, trailing)")
             state["next_shard"] += 1
             state["n_written"] += len(carry)
@@ -469,6 +498,12 @@ def main() -> None:
         action="store_true",
         help="Also store pixel_energyfrac/pixel_trackid/pixel_truth_q (implies --with_pixel_truth)",
     )
+    parser.add_argument(
+        "--with_rich_truth",
+        action="store_true",
+        help="Also store the 2nd contributor, pixel PDG, vertex truth and the mcpart/simchnl "
+        "particle tables (implies --with_extra_truth; needs the trackid_pid_map files)",
+    )
     args = parser.parse_args()
 
     create_shards(
@@ -483,6 +518,7 @@ def main() -> None:
         writers=args.writers,
         with_pixel_truth=args.with_pixel_truth,
         with_extra_truth=args.with_extra_truth,
+        with_rich_truth=args.with_rich_truth,
     )
 
 

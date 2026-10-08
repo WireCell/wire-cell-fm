@@ -71,9 +71,11 @@ class DataConfig:
     epoch_split: int = 1
 
     # Per-pixel truth is opt-in on all three backends because HDF5 decompresses those datasets
-    # on every read; event-level truth is always returned. `extra` implies `pixel`.
+    # on every read; event-level truth is always returned. `rich` implies `extra`, which
+    # implies `pixel`; `wcfm.data.truth` lists what each tier holds.
     return_pixel_truth: bool = False
     return_extra_truth: bool = False
+    return_rich_truth: bool = False
 
     # Across all ranks. Must divide by launch.devices; io.per_rank_batch_size does the split.
     global_batch_size: int = MISSING
