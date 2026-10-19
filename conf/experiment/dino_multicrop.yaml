@@ -17,7 +17,7 @@ launch:
   devices: 5
 
 run:
-  name: wcfm_dino2M_multicrop
+  name: wcfm_dino2M_multicrop_unitproto_sk
 
 model:
   augment:

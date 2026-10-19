@@ -9,3 +9,9 @@ defaults:
 
 run:
   name: wcfm_dino2M_croponly
+
+model:
+  terms:
+    dino:
+      use_centering: true
+      sinkhorn_iters: 0

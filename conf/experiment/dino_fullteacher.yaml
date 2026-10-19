@@ -17,3 +17,7 @@ model:
     cropper:
       global_scale: [1.0, 1.0]
       aspect_ratio: [0.7, 0.7]
+  terms:
+    dino:
+      use_centering: true
+      sinkhorn_iters: 0
