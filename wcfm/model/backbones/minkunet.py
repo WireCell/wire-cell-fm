@@ -26,7 +26,7 @@ from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.functional.transforms import cat
 from warpconvnet.nn.modules.sparse_conv import SparseConv2d
 
-from .base import Backbone, FeatureBundle, Injection, InjectionGroup, inject_into_skip
+from .base import Backbone, FeatureBundle, Injection, InjectionGroup, inject_into_skip, upcast
 from .blocks import (
     BottleneckSparseAttention2D,
     ConvBlock2D,
@@ -48,6 +48,18 @@ class MinkUNetAttention(Backbone):
         dec_full         1   after block8, before `final`
 
     `out` is `final(dec_full)`, in `out_dim` channels.
+
+    `decoder` picks what follows the bottleneck. `unet` concatenates each skip into the
+    decoder. `plain` runs the same decoder on its own input, taking only its output coordinates
+    from the skips. `none` builds no decoder: every pixel of `enc0` takes the features of its
+    parents at the `upcast` taps, concatenated, and `out` is `final` of that, on `enc0`'s rows.
+    `dec_half` and `dec_full` do not exist then.
+
+    `inject_at` picks where tokens enter. `skips`: into the skips after the encoder, so only
+    the decoder reads them, and the `enc*` taps are the encoder's outputs without them.
+    `input`: into `enc0` after `conv0` and into `enc1` before `conv2`, so they pass through
+    every later stage, and the `enc*` taps include them. Without the `unet` decoder nothing
+    reads a skip, so injection there is refused.
     """
 
     TAPS: ClassVar[tuple[str, ...]] = (
@@ -92,11 +104,26 @@ class MinkUNetAttention(Backbone):
         attn_ch: int = 128,
         heads: int = 4,
         inject_roles: Iterable[str] = ("masked",),
+        decoder: str = "unet",
+        upcast: Iterable[str] = ("bottleneck_attn",),
+        inject_at: str = "skips",
     ):
         super().__init__()
+        if decoder not in ("unet", "plain", "none"):
+            raise ValueError(f"decoder must be 'unet', 'plain' or 'none', got {decoder!r}")
+        if inject_at not in ("skips", "input"):
+            raise ValueError(f"inject_at must be 'skips' or 'input', got {inject_at!r}")
         stem, e1, e2, dec = (int(w) for w in widths)
         self.out_dim = int(out_dim)
         self.inject_roles = tuple(inject_roles)
+        self.decoder = decoder
+        self.inject_at = inject_at
+        if decoder == "none":
+            self.TAPS = tuple(t for t in type(self).TAPS if not t.startswith("dec_"))
+        self.upcast = tuple(upcast) if decoder == "none" else ()
+        unknown = sorted(set(self.upcast) - set(self.TAPS))
+        if unknown or (decoder == "none" and not self.upcast):
+            raise ValueError(f"upcast must be a non-empty subset of {self.TAPS}, got {unknown}")
 
         self.conv0 = ConvBlock2D(in_ch, stem, kernel_size=3, stride=1)
         self.conv1 = ConvBlock2D(stem, e1, kernel_size=2, stride=2)
@@ -115,11 +142,19 @@ class MinkUNetAttention(Backbone):
             )
         else:
             self.bottleneck = ResidualSparseBlock2D(e2, e2, kernel_size=3)
-        self.convtr5 = ConvTrBlock2D(e2, dec, kernel_size=2, stride=2)
-        self.block6 = ResidualSparseBlock2D(dec + e1, dec, kernel_size=3)
-        self.convtr7 = ConvTrBlock2D(dec, dec, kernel_size=2, stride=2)
-        self.block8 = ResidualSparseBlock2D(dec + stem, dec, kernel_size=3)
-        self.final = SparseConv2d(dec, self.out_dim, kernel_size=1, bias=True)
+        # Built in forward order: initial weights depend on it through the RNG stream.
+        tap_width = {"enc0": stem, "enc1": e1, "bottleneck": e2, "bottleneck_attn": e2}
+        if decoder == "none":
+            final_in = sum(tap_width[t] for t in self.upcast)
+        else:
+            unet = decoder == "unet"
+            self.convtr5 = ConvTrBlock2D(e2, dec, kernel_size=2, stride=2)
+            self.block6 = ResidualSparseBlock2D(dec + e1 * unet, dec, kernel_size=3)
+            self.convtr7 = ConvTrBlock2D(dec, dec, kernel_size=2, stride=2)
+            self.block8 = ResidualSparseBlock2D(dec + stem * unet, dec, kernel_size=3)
+            tap_width |= {"dec_half": dec, "dec_full": dec}
+            final_in = dec
+        self.final = SparseConv2d(final_in, self.out_dim, kernel_size=1, bias=True)
 
         # One token per (skip, role), in that skip's width. Built after the network, as the
         # old tokens were, so every other parameter draws from the same point in the RNG
@@ -127,14 +162,7 @@ class MinkUNetAttention(Backbone):
         self._skip_width = {"enc0": stem, "enc1": e1}
         # Every tap's width, so a term reading one can size its head. `dec_half` is block6's
         # output and is what the occupancy head reads: one question per 2x2 full-res block.
-        self._tap_width = {
-            "enc0": stem,
-            "enc1": e1,
-            "bottleneck": e2,
-            "bottleneck_attn": e2,
-            "dec_half": dec,
-            "dec_full": dec,
-        }
+        self._tap_width = tap_width
         self.tokens = nn.ParameterDict()
         for tap in self.INJECT_TAPS:
             for role in self.inject_roles:
@@ -165,29 +193,52 @@ class MinkUNetAttention(Backbone):
         self, xs: Voxels, inject: Injection | None = None, taps: Iterable[str] = ()
     ) -> FeatureBundle:
         taps = self.check_request(inject, taps)
+        device_type = xs.feature_tensor.device.type
+        if torch.is_autocast_enabled(device_type) and (
+            torch.get_autocast_dtype(device_type) == torch.bfloat16
+        ):
+            # A bf16 run trains on garbage or skips every step as non-finite, depending on the
+            # head; `test_bf16_autocast_is_refused` pins the refusal.
+            raise RuntimeError(
+                "MinkUNetAttention does not run under bf16 autocast: warpconvnet's bf16 sparse "
+                "convolution is numerically wrong. Set run.precision=32-true."
+            )
+        at_input = self.inject_at == "input"
+        if inject and not at_input and self.decoder != "unet":
+            raise ValueError(
+                f"decoder={self.decoder!r} reads no skip, so tokens injected there would reach "
+                "nothing; set inject_at='input'"
+            )
 
+        inj0: list[InjectionGroup] = []
+        inj1: list[InjectionGroup] = []
         enc0 = self.conv0(xs)
+        if at_input:
+            enc0, inj0 = self._skip(enc0, "enc0", inject)
         enc1 = self.block1(self.conv1(enc0))
+        if at_input:
+            enc1, inj1 = self._skip(enc1, "enc1", inject)
         bott = self.block2(self.conv2(enc1))
         bott_attn = self.bottleneck(bott)
+        values = {"enc0": enc0, "enc1": enc1, "bottleneck": bott, "bottleneck_attn": bott_attn}
 
-        # Injection happens at the skips, so a token changes both what the decoder reads and
-        # where it emits: the transposed convolution takes its output geometry from the skip.
-        skip1, inj1 = self._skip(enc1, "enc1", inject)
-        skip0, inj0 = self._skip(enc0, "enc0", inject)
+        if self.decoder == "none":
+            parents = [upcast(values[t], enc0, self.TAP_STRIDE[t]) for t in self.upcast]
+            out = self.final(enc0.replace(batched_features=torch.cat(parents, dim=1)))
+        else:
+            # A token at a skip changes both what the decoder reads and where it emits: the
+            # transposed convolution takes its output geometry from the skip.
+            skip1, skip0 = enc1, enc0
+            if not at_input:
+                skip1, inj1 = self._skip(enc1, "enc1", inject)
+                skip0, inj0 = self._skip(enc0, "enc0", inject)
+            up1 = self.convtr5(bott_attn, skip1)
+            dec_half = self.block6(cat(up1, skip1) if self.decoder == "unet" else up1)
+            up0 = self.convtr7(dec_half, skip0)
+            dec_full = self.block8(cat(up0, skip0) if self.decoder == "unet" else up0)
+            out = self.final(dec_full)
+            values |= {"dec_half": dec_half, "dec_full": dec_full}
 
-        dec_half = self.block6(cat(self.convtr5(bott_attn, skip1), skip1))
-        dec_full = self.block8(cat(self.convtr7(dec_half, skip0), skip0))
-        out = self.final(dec_full)
-
-        values = {
-            "enc0": enc0,
-            "enc1": enc1,
-            "bottleneck": bott,
-            "bottleneck_attn": bott_attn,
-            "dec_half": dec_half,
-            "dec_full": dec_full,
-        }
         return FeatureBundle(
             out=out,
             taps={t: values[t] for t in taps},
