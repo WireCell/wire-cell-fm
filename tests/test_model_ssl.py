@@ -66,7 +66,7 @@ def augment(*, crop=True, mask=True, n_global=1, n_local=2) -> Augment:
     return Augment(cropper=cropper, masker=masker)
 
 
-def build(preset: str, *, normalize=None, teacher=True, **aug) -> SslModule:
+def build(preset: str, *, normalize=None, teacher=True, backbone=None, **aug) -> SslModule:
     torch.manual_seed(0)
     terms = {}
     if preset in ("dino", "hybrid", "hybrid_charge"):
@@ -77,7 +77,7 @@ def build(preset: str, *, normalize=None, teacher=True, **aug) -> SslModule:
     if preset in ("hybrid_charge", "charge"):
         terms["charge"] = ChargeTerm(weight=0.1)
     return SslModule(
-        backbone=LinearBackbone(in_dim=1, hidden=8, out_dim=8),
+        backbone=backbone or LinearBackbone(in_dim=1, hidden=8, out_dim=8),
         terms=terms,
         augment=augment(**aug),
         teacher=EmaTeacher(0.9, 1.0) if teacher else NoTeacher(),
@@ -153,6 +153,29 @@ def test_plain_dino_reports_no_masked_split():
     m = build("dino")
     out = m.training_step(batch(), ctx_for(m))
     assert "loss_masked" not in out.scalars and out.scalars["n_pairs"] == 2
+
+
+def test_the_teacher_temperature_warms_up_linearly_then_holds():
+    term = DinoTerm(teacher_temp=0.07, teacher_temp_start=0.04, teacher_temp_warmup=0.05)
+    at = [
+        term.teacher_temp_at(
+            StepContext(
+                step=s,
+                epoch=0,
+                device="cpu",
+                module=None,
+                all_reduce=None,
+                extra={"total_iters": 1000},
+            )
+        )
+        for s in (0, 25, 50, 999)
+    ]
+    assert at == pytest.approx([0.04, 0.055, 0.07, 0.07])
+    offline = StepContext(step=0, epoch=0, device="cpu", module=None, all_reduce=None)
+    assert term.teacher_temp_at(offline) == pytest.approx(0.07)
+    assert DinoTerm(teacher_temp=0.07).teacher_temp_at(offline) == pytest.approx(0.07)
+    with pytest.raises(ValueError, match="together"):
+        DinoTerm(teacher_temp_start=0.04)
 
 
 def test_hybrid_plus_charge_composes_both_terms_and_the_weights():
@@ -589,10 +612,29 @@ def test_the_multi_view_forward_survives_fabrics_mixed_precision_cast(tmp_path):
     in seconds, because the cast has nothing to do with the device.
 
     ``ViewRequest`` is therefore a NamedTuple, and this test is what keeps it one.
+
+    It also records the autocast inside every backbone forward: the teacher's, reached through
+    ``ctx.module(teacher=True)`` under ``no_grad``, must autocast as the student's does. The
+    output dtype cannot tell you, since the forward upcasts on the way out.
     """
     from lightning_fabric import Fabric
 
-    module = build("hybrid_charge", n_global=1, n_local=2)
+    seen: set[tuple[bool, bool, torch.dtype]] = set()
+
+    class Recording(LinearBackbone):
+        def forward(self, xs, inject=None, taps=()):
+            seen.add(
+                (
+                    torch.is_grad_enabled(),
+                    torch.is_autocast_enabled("cpu"),
+                    torch.get_autocast_dtype("cpu"),
+                )
+            )
+            return super().forward(xs, inject, taps)
+
+    module = build(
+        "hybrid_charge", n_global=1, n_local=2, backbone=Recording(in_dim=1, hidden=8, out_dim=8)
+    )
     trainer = Trainer(
         cfg(tmp_path, optim__epochs=1, metrics__step_cadence=1, run__precision="bf16-mixed"),
         module,
@@ -602,3 +644,7 @@ def test_the_multi_view_forward_survives_fabrics_mixed_precision_cast(tmp_path):
     )
     result = trainer.fit()
     assert result["steps"] == 2 and result["skipped_nonfinite"] == 0
+    assert seen == {(True, True, torch.bfloat16), (False, True, torch.bfloat16)}, (
+        f"(grad enabled, autocast, dtype) seen inside the backbone: {sorted(seen, key=str)}; "
+        "the student and the teacher must both autocast to bfloat16"
+    )
