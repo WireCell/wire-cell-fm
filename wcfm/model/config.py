@@ -60,6 +60,10 @@ class MinkUNetConfig:
     bottleneck_depth: int = 1
     # A third strided stage before the bottleneck (stride 8); a decoder gains the stage back.
     stage3: bool = False
+    # Layer-normalise q and k in the bottleneck attention. Off here and in the constructor, so a
+    # checkpoint whose stored config predates the field rebuilds without the norms, as it was
+    # trained; `conf/model/backbone/attn_mae.yaml` turns it on for every new run.
+    qk_norm: bool = False
 
 
 @dataclass

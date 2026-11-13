@@ -59,6 +59,8 @@ class MinkUNetAttention(Backbone):
     at `enc0` and the `candidate` role at `enc1`, and the decoder reaches their rows through
     those skips.
 
+    `qk_norm` normalises q and k in every bottleneck attention (`SpatialFeatureAttention2D`).
+
     `decoder` picks what follows the bottleneck. `unet` concatenates each skip into the
     decoder. `plain` runs the same decoder on its own input, taking only its output coordinates
     from the skips. `none` builds no decoder: every pixel of `enc0` takes the features of its
@@ -121,6 +123,7 @@ class MinkUNetAttention(Backbone):
         inject_at: str = "skips",
         bottleneck_depth: int = 1,
         stage3: bool = False,
+        qk_norm: bool = False,
     ):
         super().__init__()
         if decoder not in ("unet", "plain", "none"):
@@ -174,6 +177,7 @@ class MinkUNetAttention(Backbone):
                 flash=flash_attention,
                 encoding_range=encoding_range,
                 encoding_channels=encoding_dim,
+                qk_norm=qk_norm,
             )
 
         blocks = [bottleneck_block() for _ in range(bottleneck_depth)]

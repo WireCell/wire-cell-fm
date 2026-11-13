@@ -206,6 +206,7 @@ def test_the_old_backbone_registry_is_reachable_as_flags(hydra_all):
         ("spatial_encoding", True),
         ("flash_attention", True),
         ("inject_roles", ["masked"]),
+        ("qk_norm", True),
     ):
         assert shipped[key] == value, f"attn_mae is the shipped backbone: {key}"
 

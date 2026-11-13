@@ -1,8 +1,9 @@
 """Sparse attention over 2-D coordinates.
 
 Both the flash and the dense path inject the positional encoding the same way -- head-dim
-wide, into q and k after the qkv projection, never into v -- so they compute the same operator
-and differ only in the kernel and in whether the features are padded.
+wide, into q and k after the qkv projection, never into v -- and apply `qk_norm` after it, so
+they compute the same operator and differ only in the kernel and in whether the features are
+padded.
 """
 
 from __future__ import annotations
@@ -84,7 +85,13 @@ class ToAttentionSmart(BaseSpatialModule):
 
 
 class SpatialFeatureAttention2D(Attention):
-    """Attention over `(x, y)` coordinates; flash on/off, encoding on/off."""
+    """Attention over `(x, y)` coordinates; flash on/off, encoding on/off.
+
+    `qk_norm` layer-normalises each head's q and k over the head dimension, after the
+    encoding is added, so a logit is bounded by the norms' gains however large the qkv weights
+    grow. Without it the logit scale is the product of the q and k weights, and a head can run
+    away into a one-hot attention while weight decay shrinks every other parameter.
+    """
 
     def __init__(
         self,
@@ -99,6 +106,7 @@ class SpatialFeatureAttention2D(Attention):
         use_encoding: bool = True,
         enable_flash: bool = True,
         use_batched_qkv: bool = True,
+        qk_norm: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -122,6 +130,9 @@ class SpatialFeatureAttention2D(Attention):
             out_type="cat",
         )
         self.from_attn = ToSpatialFeatures()
+        head_dim = dim // num_heads
+        self.q_norm = nn.LayerNorm(head_dim) if qk_norm else nn.Identity()
+        self.k_norm = nn.LayerNorm(head_dim) if qk_norm else nn.Identity()
 
     def forward(self, x: Geometry) -> Geometry:
         if not self.enable_flash:
@@ -133,6 +144,7 @@ class SpatialFeatureAttention2D(Attention):
             if pos_enc is not None:
                 q = q + pos_enc.unsqueeze(1)
                 k = k + pos_enc.unsqueeze(1)
+            q, k = self.q_norm(q), self.k_norm(k)
             attn = (q @ k.transpose(-2, -1)) * self.scale
             if mask is not None:
                 attn_bias = torch.zeros(mask.shape, dtype=attn.dtype, device=attn.device)
@@ -153,10 +165,13 @@ class SpatialFeatureAttention2D(Attention):
         M, C = feats.shape[:2]
         qkv = self.qkv(feats).reshape(M, 3, self.num_heads, C // self.num_heads)
         # Into q and k only, never v, so position acts as an attention bias and never leaks
-        # into aggregated content. Before the fp16 cast, so the encoding keeps full precision.
+        # into aggregated content. Before the fp16 cast, so the encoding and the norms keep
+        # full precision.
+        q, k, v = qkv.unbind(1)
         if pos_enc_cat is not None:
             pe = pos_enc_cat.unsqueeze(1)
-            qkv = torch.stack([qkv[:, 0] + pe, qkv[:, 1] + pe, qkv[:, 2]], dim=1)
+            q, k = q + pe, k + pe
+        qkv = torch.stack([self.q_norm(q), self.k_norm(k), v], dim=1)
         if qkv.dtype not in (torch.float16, torch.bfloat16):
             qkv = qkv.to(torch.float16)
         max_seqlen = int(offsets.diff().max())

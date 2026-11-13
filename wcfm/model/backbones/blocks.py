@@ -80,6 +80,7 @@ class BottleneckSparseAttention2D(nn.Module):
         encoding_range: float = 1.0,
         encoding_channels: int = 32,
         flash: bool = True,
+        qk_norm: bool = False,
     ):
         super().__init__()
         self.pre_proj = SparseConv2d(channels, attn_channels, kernel_size=1)
@@ -97,6 +98,7 @@ class BottleneckSparseAttention2D(nn.Module):
             encoding_range=encoding_range,
             enable_flash=flash,
             use_batched_qkv=True,
+            qk_norm=qk_norm,
         )
         hidden = int(attn_channels * mlp_ratio)
         self.mlp = Sequential(

@@ -182,6 +182,21 @@ def test_stage3_quarter_taps_share_the_encoders_rows(device):
     assert {t.feature_tensor.shape[1] for t in taps.values()} == {m.tap_dim("enc2")}
 
 
+def test_qk_norm_flash_and_dense_paths_agree(device):
+    torch.manual_seed(0)
+    flash = MinkUNetAttention(encoding_range=64, qk_norm=True, bottleneck_depth=2).to(device)
+    dense = MinkUNetAttention(
+        encoding_range=64, qk_norm=True, bottleneck_depth=2, flash_attention=False
+    ).to(device)
+    dense.load_state_dict(flash.state_dict())
+    xs, _ = scene(device)
+    with torch.no_grad():
+        a, b = flash.eval()(xs).out, dense.eval()(xs).out
+    assert torch.equal(a.coordinate_tensor, b.coordinate_tensor)
+    # flash runs q, k and v in fp16
+    torch.testing.assert_close(a.feature_tensor, b.feature_tensor, rtol=2e-2, atol=2e-2)
+
+
 def test_the_plain_decoder_emits_on_the_input_rows(device):
     m = MinkUNetAttention(encoding_range=64, decoder="plain").to(device).eval()
     xs, removed = scene(device)
