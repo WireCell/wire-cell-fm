@@ -218,3 +218,39 @@ def test_bf16_autocast_is_refused():
     for ctx in (torch.autocast("cpu", enabled=False), torch.autocast("cpu", dtype=torch.float16)):
         with ctx, pytest.raises(AssertionError, match="CUDA"):
             m(xs)
+
+
+def test_bottleneck_depth_and_stage3_build_what_they_say():
+    """Depth 1 keeps the `bottleneck.*` keys every existing checkpoint has; `stage3` moves the
+    bottleneck taps to stride 8 on the instance only, and gives a decoder the stage back."""
+    one = MinkUNetAttention(encoding_range=64, decoder="none")
+    assert any(k.startswith("bottleneck.attn.") for k in one.state_dict())
+    deep = MinkUNetAttention(encoding_range=64, decoder="none", bottleneck_depth=3)
+    assert {k.split(".")[1] for k in deep.state_dict() if k.startswith("bottleneck.")} == {
+        "0",
+        "1",
+        "2",
+    }
+    s3 = MinkUNetAttention(encoding_range=64, decoder="none", stage3=True)
+    assert s3.TAP_STRIDE["bottleneck_attn"] == 8 and s3.TAP_STRIDE["enc1"] == 2
+    assert s3.TAPS == ("enc0", "enc1", "enc2", "bottleneck", "bottleneck_attn")
+    assert s3.TAP_STRIDE["enc2"] == 4 and s3.tap_dim("enc2") == 64
+    assert s3.INJECT_TAPS == ("enc0", "enc1")
+    assert MinkUNetAttention.TAP_STRIDE["bottleneck_attn"] == 4
+    assert MinkUNetAttention(encoding_range=64).TAPS == MinkUNetAttention.TAPS
+    assert any(k.startswith("block3.") for k in s3.state_dict())
+    assert not any(k.startswith(("convtr4.", "block5.")) for k in s3.state_dict())
+    s3_unet = MinkUNetAttention(encoding_range=64, stage3=True)
+    assert {k.split(".")[0] for k in s3_unet.state_dict()} >= {"block3", "convtr4", "block5"}
+    assert s3_unet.TAPS[-3:] == ("dec_quarter", "dec_half", "dec_full")
+    assert s3_unet.TAP_STRIDE["dec_quarter"] == 4 and s3_unet.tap_dim("dec_quarter") == 64
+    one_params = sum(p.numel() for p in MinkUNetAttention(encoding_range=64).parameters())
+    s3_params = sum(p.numel() for p in s3_unet.parameters())
+    stage_params = sum(
+        p.numel()
+        for m in (s3_unet.conv3, s3_unet.block3, s3_unet.convtr4, s3_unet.block5)
+        for p in m.parameters()
+    )
+    assert s3_params == one_params + stage_params
+    with pytest.raises(ValueError, match="bottleneck_depth"):
+        MinkUNetAttention(encoding_range=64, bottleneck_depth=0)

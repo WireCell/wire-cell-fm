@@ -56,6 +56,10 @@ class MinkUNetConfig:
     # Where mask tokens enter: `skips` (only the decoder reads them) or `input` (after `conv0`,
     # through the whole encoder). Any decoder but `unet` needs `input`.
     inject_at: str = "skips"
+    # Bottleneck blocks stacked in sequence.
+    bottleneck_depth: int = 1
+    # A third strided stage before the bottleneck (stride 8); a decoder gains the stage back.
+    stage3: bool = False
 
 
 @dataclass

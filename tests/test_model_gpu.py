@@ -118,27 +118,68 @@ def test_tokens_injected_at_the_input_pass_through_the_encoder(device):
     assert {(g.tap, g.role) for g in bundle.injected.groups} == {("enc0", "masked")}
 
 
-def test_without_a_decoder_each_pixel_carries_its_cell_on_the_input_rows(device):
+@pytest.mark.parametrize("stage3, side, depth", [(False, 4, 1), (True, 8, 2)])
+def test_without_a_decoder_each_pixel_carries_its_cell_on_the_input_rows(
+    device, stage3, side, depth
+):
     torch.manual_seed(0)
-    m = MinkUNetAttention(encoding_range=64, decoder="none").to(device).eval()
+    m = (
+        MinkUNetAttention(encoding_range=64, decoder="none", stage3=stage3, bottleneck_depth=depth)
+        .to(device)
+        .eval()
+    )
     xs, removed = scene(device)
     with torch.no_grad():
         out = m(xs).out
     assert torch.equal(out.coordinate_tensor, xs.coordinate_tensor)
     assert torch.equal(out.offsets.cpu(), xs.offsets.cpu())
     _, cell = torch.unique(
-        torch.div(xs.coordinate_tensor, 4, rounding_mode="floor"), dim=0, return_inverse=True
+        torch.div(xs.coordinate_tensor, side, rounding_mode="floor"), dim=0, return_inverse=True
     )
     first = torch.full((int(cell.max()) + 1,), -1, dtype=torch.long, device=device)
     first.scatter_reduce_(
         0, cell, torch.arange(cell.shape[0], device=device), "amin", include_self=False
     )
     feats = out.feature_tensor
-    assert torch.equal(feats, feats[first[cell]]), "pixels of one 4x4 cell must agree"
+    assert torch.equal(feats, feats[first[cell]]), "pixels of one cell must agree"
+    assert not torch.equal(feats, feats[:1].expand_as(feats)), "every cell is the same"
     with pytest.raises(ValueError, match="no tap"):
         m(xs, None, ("dec_full",))
     with pytest.raises(ValueError, match="inject_at='input'"):
         m(xs, Injection([InjectionGroup("enc0", [removed], "masked", 1)]))
+
+
+def test_stage3_with_the_unet_decoder_emits_per_pixel_on_the_input_rows(device):
+    torch.manual_seed(0)
+    m = MinkUNetAttention(encoding_range=64, stage3=True, bottleneck_depth=2).to(device).eval()
+    xs, removed = scene(device)
+    inject = Injection([InjectionGroup("enc0", [removed], "masked", 1)])
+    with torch.no_grad():
+        out = m(xs).out
+        masked = m(xs, inject)
+    assert as_pairs(out.coordinate_tensor) == as_pairs(xs.coordinate_tensor)
+    assert as_pairs(removed) <= as_pairs(masked.out.coordinate_tensor)
+    # unlike decoder='none', the pixels of one stride-8 cell do not all share a vector
+    _, cell = torch.unique(
+        torch.div(out.coordinate_tensor, 8, rounding_mode="floor"), dim=0, return_inverse=True
+    )
+    first = torch.full((int(cell.max()) + 1,), -1, dtype=torch.long, device=device)
+    first.scatter_reduce_(
+        0, cell, torch.arange(cell.shape[0], device=device), "amin", include_self=False
+    )
+    feats = out.feature_tensor
+    assert not torch.equal(feats, feats[first[cell]])
+
+
+def test_stage3_quarter_taps_share_the_encoders_rows(device):
+    m = MinkUNetAttention(encoding_range=64, stage3=True).to(device).eval()
+    xs, _ = scene(device)
+    with torch.no_grad():
+        taps = m(xs, None, ("enc2", "dec_quarter")).taps
+    assert as_pairs(taps["dec_quarter"].coordinate_tensor) == as_pairs(
+        taps["enc2"].coordinate_tensor
+    )
+    assert {t.feature_tensor.shape[1] for t in taps.values()} == {m.tap_dim("enc2")}
 
 
 def test_the_plain_decoder_emits_on_the_input_rows(device):

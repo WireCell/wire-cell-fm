@@ -36,18 +36,28 @@ from .blocks import (
 
 
 class MinkUNetAttention(Backbone):
-    """Sparse encoder (2 strided stages), attention bottleneck, sparse decoder with skips.
+    """Sparse encoder (2 strided stages, 3 with `stage3`), attention bottleneck, sparse decoder
+    with skips.
 
-    Taps, in forward order, with their stride relative to the input:
+    Taps, in forward order, with their stride relative to the input (`stage3` in brackets):
 
-        enc0             1   after conv0: the full-res skip (and injection site)
-        enc1             2   after block1: the half-res skip (and injection site)
-        bottleneck       4   after block2, before the bottleneck
-        bottleneck_attn  4   after the bottleneck
-        dec_half         2   after block6
-        dec_full         1   after block8, before `final`
+        enc0             1      after conv0: the full-res skip (and injection site)
+        enc1             2      after block1: the half-res skip (and injection site)
+        enc2             (4)    after block2: the quarter-res skip; only with `stage3`
+        bottleneck       4 (8)  before the bottleneck blocks
+        bottleneck_attn  4 (8)  after the bottleneck blocks
+        dec_quarter      (4)    after block5; only with `stage3`
+        dec_half         2      after block6
+        dec_full         1      after block8, before `final`
 
     `out` is `final(dec_full)`, in `out_dim` channels.
+
+    `bottleneck_depth` stacks that many bottleneck blocks. `stage3` adds a third strided stage
+    (`conv3`, `block3`, at the bottleneck's width) before the bottleneck. A decoder then opens
+    with `convtr4` and `block5`, which return to stride 4 on `enc2`'s rows and, under `unet`,
+    concatenate `enc2`. Tokens are never injected at `enc2`: the terms inject the `masked` role
+    at `enc0` and the `candidate` role at `enc1`, and the decoder reaches their rows through
+    those skips.
 
     `decoder` picks what follows the bottleneck. `unet` concatenates each skip into the
     decoder. `plain` runs the same decoder on its own input, taking only its output coordinates
@@ -83,7 +93,9 @@ class MinkUNetAttention(Backbone):
         "conv0": ("conv0.",),
         "enc1": ("conv1.", "block1."),
         "enc2": ("conv2.", "block2."),
+        "enc3": ("conv3.", "block3."),
         "bottleneck": ("bottleneck.",),
+        "dec0": ("convtr4.", "block5."),
         "dec1": ("convtr5.", "block6."),
         "dec2": ("convtr7.", "block8."),
         "final": ("final.",),
@@ -107,19 +119,36 @@ class MinkUNetAttention(Backbone):
         decoder: str = "unet",
         upcast: Iterable[str] = ("bottleneck_attn",),
         inject_at: str = "skips",
+        bottleneck_depth: int = 1,
+        stage3: bool = False,
     ):
         super().__init__()
         if decoder not in ("unet", "plain", "none"):
             raise ValueError(f"decoder must be 'unet', 'plain' or 'none', got {decoder!r}")
         if inject_at not in ("skips", "input"):
             raise ValueError(f"inject_at must be 'skips' or 'input', got {inject_at!r}")
+        if bottleneck_depth < 1:
+            raise ValueError(f"bottleneck_depth must be at least 1, got {bottleneck_depth}")
         stem, e1, e2, dec = (int(w) for w in widths)
+        self.stage3 = stage3
+        taps = type(self).TAPS
+        if stage3:
+            # Instance attributes: the class tables describe the two-stage network.
+            self.TAP_STRIDE = type(self).TAP_STRIDE | {
+                "enc2": 4,
+                "bottleneck": 8,
+                "bottleneck_attn": 8,
+                "dec_quarter": 4,
+            }
+            taps = ("enc0", "enc1", "enc2", "bottleneck", "bottleneck_attn", "dec_quarter")
+            taps += ("dec_half", "dec_full")
+        if decoder == "none":
+            taps = tuple(t for t in taps if not t.startswith("dec_"))
+        self.TAPS = taps
         self.out_dim = int(out_dim)
         self.inject_roles = tuple(inject_roles)
         self.decoder = decoder
         self.inject_at = inject_at
-        if decoder == "none":
-            self.TAPS = tuple(t for t in type(self).TAPS if not t.startswith("dec_"))
         self.upcast = tuple(upcast) if decoder == "none" else ()
         unknown = sorted(set(self.upcast) - set(self.TAPS))
         if unknown or (decoder == "none" and not self.upcast):
@@ -130,8 +159,14 @@ class MinkUNetAttention(Backbone):
         self.block1 = ResidualSparseBlock2D(e1, e1, kernel_size=3)
         self.conv2 = ConvBlock2D(e1, e1, kernel_size=2, stride=2)
         self.block2 = ResidualSparseBlock2D(e1, e2, kernel_size=3)
-        if attention:
-            self.bottleneck: nn.Module = BottleneckSparseAttention2D(
+        if stage3:
+            self.conv3 = ConvBlock2D(e2, e2, kernel_size=2, stride=2)
+            self.block3 = ResidualSparseBlock2D(e2, e2, kernel_size=3)
+
+        def bottleneck_block() -> nn.Module:
+            if not attention:
+                return ResidualSparseBlock2D(e2, e2, kernel_size=3)
+            return BottleneckSparseAttention2D(
                 channels=e2,
                 attn_channels=attn_ch,
                 heads=heads,
@@ -140,14 +175,21 @@ class MinkUNetAttention(Backbone):
                 encoding_range=encoding_range,
                 encoding_channels=encoding_dim,
             )
-        else:
-            self.bottleneck = ResidualSparseBlock2D(e2, e2, kernel_size=3)
+
+        blocks = [bottleneck_block() for _ in range(bottleneck_depth)]
+        # A single block stays unwrapped so depth-1 checkpoints keep their `bottleneck.*` keys.
+        self.bottleneck: nn.Module = blocks[0] if bottleneck_depth == 1 else nn.Sequential(*blocks)
         # Built in forward order: initial weights depend on it through the RNG stream.
         tap_width = {"enc0": stem, "enc1": e1, "bottleneck": e2, "bottleneck_attn": e2}
+        if stage3:
+            tap_width |= {"enc2": e2, "dec_quarter": e2}
         if decoder == "none":
             final_in = sum(tap_width[t] for t in self.upcast)
         else:
             unet = decoder == "unet"
+            if stage3:
+                self.convtr4 = ConvTrBlock2D(e2, e2, kernel_size=2, stride=2)
+                self.block5 = ResidualSparseBlock2D(e2 + e2 * unet, e2, kernel_size=3)
             self.convtr5 = ConvTrBlock2D(e2, dec, kernel_size=2, stride=2)
             self.block6 = ResidualSparseBlock2D(dec + e1 * unet, dec, kernel_size=3)
             self.convtr7 = ConvTrBlock2D(dec, dec, kernel_size=2, stride=2)
@@ -218,9 +260,19 @@ class MinkUNetAttention(Backbone):
         enc1 = self.block1(self.conv1(enc0))
         if at_input:
             enc1, inj1 = self._skip(enc1, "enc1", inject)
-        bott = self.block2(self.conv2(enc1))
+        enc2 = bott = self.block2(self.conv2(enc1))
+        if self.stage3:
+            bott = self.block3(self.conv3(enc2))
         bott_attn = self.bottleneck(bott)
-        values = {"enc0": enc0, "enc1": enc1, "bottleneck": bott, "bottleneck_attn": bott_attn}
+        # Only the names in `self.TAPS` are served: `enc2` and `dec_quarter` without `stage3`
+        # are `bottleneck` and `bottleneck_attn` under another name.
+        values = {
+            "enc0": enc0,
+            "enc1": enc1,
+            "enc2": enc2,
+            "bottleneck": bott,
+            "bottleneck_attn": bott_attn,
+        }
 
         if self.decoder == "none":
             parents = [upcast(values[t], enc0, self.TAP_STRIDE[t]) for t in self.upcast]
@@ -232,12 +284,16 @@ class MinkUNetAttention(Backbone):
             if not at_input:
                 skip1, inj1 = self._skip(enc1, "enc1", inject)
                 skip0, inj0 = self._skip(enc0, "enc0", inject)
-            up1 = self.convtr5(bott_attn, skip1)
+            dec_quarter = bott_attn
+            if self.stage3:
+                up2 = self.convtr4(bott_attn, enc2)
+                dec_quarter = self.block5(cat(up2, enc2) if self.decoder == "unet" else up2)
+            up1 = self.convtr5(dec_quarter, skip1)
             dec_half = self.block6(cat(up1, skip1) if self.decoder == "unet" else up1)
             up0 = self.convtr7(dec_half, skip0)
             dec_full = self.block8(cat(up0, skip0) if self.decoder == "unet" else up0)
             out = self.final(dec_full)
-            values |= {"dec_half": dec_half, "dec_full": dec_full}
+            values |= {"dec_quarter": dec_quarter, "dec_half": dec_half, "dec_full": dec_full}
 
         return FeatureBundle(
             out=out,
