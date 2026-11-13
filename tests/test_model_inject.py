@@ -20,8 +20,10 @@ from warpconvnet.geometry.types.voxels import Voxels  # noqa: E402
 from wcfm.model.backbones import (  # noqa: E402
     Injection,
     InjectionGroup,
+    MinkUNetAttention,
     inject_into_skip,
     project_coords,
+    upcast,
 )
 
 from .fake_backbone import as_pairs  # noqa: E402
@@ -174,3 +176,81 @@ def test_merge_of_nothing_is_none():
     g = InjectionGroup("enc0", [torch.zeros(0, 2)], "masked", 1)
     merged = Injection.merge([None, Injection([g]), Injection([g])])
     assert merged is not None and len(merged.groups) == 2
+
+
+def images_of(*coords_per_image, width=1) -> Voxels:
+    """Several images; each row's features are its global row index, repeated `width` times."""
+    coords = torch.cat([torch.as_tensor(c, dtype=torch.int32) for c in coords_per_image])
+    counts = torch.tensor([len(c) for c in coords_per_image], dtype=torch.int64)
+    offsets = torch.cat([torch.zeros(1, dtype=torch.int64), counts.cumsum(0)])
+    feats = torch.arange(coords.shape[0], dtype=torch.float32).unsqueeze(1).repeat(1, width)
+    return Voxels(
+        batched_coordinates=IntCoords(coords, offsets=offsets),
+        batched_features=CatFeatures(feats, offsets=offsets),
+        offsets=offsets,
+    )
+
+
+def test_upcast_gives_each_fine_row_its_parent_in_the_fine_order():
+    fine = images_of([[9, 1], [0, 0], [3, 3], [4, 0]], [[1, 1], [8, 8]])
+    coarse = images_of([[1, 0], [0, 0], [2, 0]], [[2, 2], [0, 0]], width=3)
+    got = upcast(coarse, fine, 4)[:, 0].tolist()
+    # [1, 1] in image 1 floors to [0, 0], which is image 1's own parent, not image 0's
+    assert got == [2.0, 1.0, 1.0, 0.0, 4.0, 3.0]
+    assert upcast(coarse, fine, 4).shape == (6, 3)
+
+
+def test_upcast_raises_on_a_row_without_a_parent_and_handles_a_trailing_empty_image():
+    fine = images_of([[0, 0]], [[5, 5]])
+    with pytest.raises(RuntimeError, match="no parent"):
+        upcast(images_of([[0, 0]], [[0, 0]]), fine, 4)
+    # a strided conv drops a trailing empty image from its offsets; the fine map has none there
+    assert upcast(images_of([[0, 0]]), images_of([[1, 2]], []), 4).tolist() == [[0.0]]
+
+
+def test_bf16_autocast_is_refused():
+    """The refusal comes before the first convolution, so the CPU reaches it; without autocast
+    or under fp16 the forward goes on to the convolution, which wants CUDA."""
+    m = MinkUNetAttention(encoding_range=64)
+    xs = images_of([[1, 1], [2, 2]])
+    with torch.autocast("cpu", dtype=torch.bfloat16), pytest.raises(RuntimeError, match="bf16"):
+        m(xs)
+    for ctx in (torch.autocast("cpu", enabled=False), torch.autocast("cpu", dtype=torch.float16)):
+        with ctx, pytest.raises(AssertionError, match="CUDA"):
+            m(xs)
+
+
+def test_bottleneck_depth_and_stage3_build_what_they_say():
+    """Depth 1 keeps the `bottleneck.*` keys every existing checkpoint has; `stage3` moves the
+    bottleneck taps to stride 8 on the instance only, and gives a decoder the stage back."""
+    one = MinkUNetAttention(encoding_range=64, decoder="none")
+    assert any(k.startswith("bottleneck.attn.") for k in one.state_dict())
+    deep = MinkUNetAttention(encoding_range=64, decoder="none", bottleneck_depth=3)
+    assert {k.split(".")[1] for k in deep.state_dict() if k.startswith("bottleneck.")} == {
+        "0",
+        "1",
+        "2",
+    }
+    s3 = MinkUNetAttention(encoding_range=64, decoder="none", stage3=True)
+    assert s3.TAP_STRIDE["bottleneck_attn"] == 8 and s3.TAP_STRIDE["enc1"] == 2
+    assert s3.TAPS == ("enc0", "enc1", "enc2", "bottleneck", "bottleneck_attn")
+    assert s3.TAP_STRIDE["enc2"] == 4 and s3.tap_dim("enc2") == 64
+    assert s3.INJECT_TAPS == ("enc0", "enc1")
+    assert MinkUNetAttention.TAP_STRIDE["bottleneck_attn"] == 4
+    assert MinkUNetAttention(encoding_range=64).TAPS == MinkUNetAttention.TAPS
+    assert any(k.startswith("block3.") for k in s3.state_dict())
+    assert not any(k.startswith(("convtr4.", "block5.")) for k in s3.state_dict())
+    s3_unet = MinkUNetAttention(encoding_range=64, stage3=True)
+    assert {k.split(".")[0] for k in s3_unet.state_dict()} >= {"block3", "convtr4", "block5"}
+    assert s3_unet.TAPS[-3:] == ("dec_quarter", "dec_half", "dec_full")
+    assert s3_unet.TAP_STRIDE["dec_quarter"] == 4 and s3_unet.tap_dim("dec_quarter") == 64
+    one_params = sum(p.numel() for p in MinkUNetAttention(encoding_range=64).parameters())
+    s3_params = sum(p.numel() for p in s3_unet.parameters())
+    stage_params = sum(
+        p.numel()
+        for m in (s3_unet.conv3, s3_unet.block3, s3_unet.convtr4, s3_unet.block5)
+        for p in m.parameters()
+    )
+    assert s3_params == one_params + stage_params
+    with pytest.raises(ValueError, match="bottleneck_depth"):
+        MinkUNetAttention(encoding_range=64, bottleneck_depth=0)

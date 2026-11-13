@@ -100,17 +100,118 @@ def test_out_dim_and_width_flags_are_honoured(device):
     )
 
 
-def _module(precision_flag: list):
+def test_tokens_injected_at_the_input_pass_through_the_encoder(device):
+    torch.manual_seed(0)
+    m = MinkUNetAttention(encoding_range=64, inject_at="input").to(device).eval()
+    xs, removed = scene(device)
+    inject = Injection([InjectionGroup("enc0", [removed], "masked", 1)])
+    with torch.no_grad():
+        plain = m(xs, None, ("bottleneck",))
+        bundle = m(xs, inject, ("enc0", "bottleneck"))
+    assert as_pairs(removed) <= as_pairs(bundle.out.coordinate_tensor)
+    assert as_pairs(removed) <= as_pairs(bundle.taps["enc0"].coordinate_tensor)
+    # the hole holds whole stride-4 cells, which only the tokens can have created
+    assert (
+        bundle.taps["bottleneck"].coordinate_tensor.shape[0]
+        > plain.taps["bottleneck"].coordinate_tensor.shape[0]
+    )
+    assert {(g.tap, g.role) for g in bundle.injected.groups} == {("enc0", "masked")}
+
+
+@pytest.mark.parametrize("stage3, side, depth", [(False, 4, 1), (True, 8, 2)])
+def test_without_a_decoder_each_pixel_carries_its_cell_on_the_input_rows(
+    device, stage3, side, depth
+):
+    torch.manual_seed(0)
+    m = (
+        MinkUNetAttention(encoding_range=64, decoder="none", stage3=stage3, bottleneck_depth=depth)
+        .to(device)
+        .eval()
+    )
+    xs, removed = scene(device)
+    with torch.no_grad():
+        out = m(xs).out
+    assert torch.equal(out.coordinate_tensor, xs.coordinate_tensor)
+    assert torch.equal(out.offsets.cpu(), xs.offsets.cpu())
+    _, cell = torch.unique(
+        torch.div(xs.coordinate_tensor, side, rounding_mode="floor"), dim=0, return_inverse=True
+    )
+    first = torch.full((int(cell.max()) + 1,), -1, dtype=torch.long, device=device)
+    first.scatter_reduce_(
+        0, cell, torch.arange(cell.shape[0], device=device), "amin", include_self=False
+    )
+    feats = out.feature_tensor
+    assert torch.equal(feats, feats[first[cell]]), "pixels of one cell must agree"
+    assert not torch.equal(feats, feats[:1].expand_as(feats)), "every cell is the same"
+    with pytest.raises(ValueError, match="no tap"):
+        m(xs, None, ("dec_full",))
+    with pytest.raises(ValueError, match="inject_at='input'"):
+        m(xs, Injection([InjectionGroup("enc0", [removed], "masked", 1)]))
+
+
+def test_stage3_with_the_unet_decoder_emits_per_pixel_on_the_input_rows(device):
+    torch.manual_seed(0)
+    m = MinkUNetAttention(encoding_range=64, stage3=True, bottleneck_depth=2).to(device).eval()
+    xs, removed = scene(device)
+    inject = Injection([InjectionGroup("enc0", [removed], "masked", 1)])
+    with torch.no_grad():
+        out = m(xs).out
+        masked = m(xs, inject)
+    assert as_pairs(out.coordinate_tensor) == as_pairs(xs.coordinate_tensor)
+    assert as_pairs(removed) <= as_pairs(masked.out.coordinate_tensor)
+    # unlike decoder='none', the pixels of one stride-8 cell do not all share a vector
+    _, cell = torch.unique(
+        torch.div(out.coordinate_tensor, 8, rounding_mode="floor"), dim=0, return_inverse=True
+    )
+    first = torch.full((int(cell.max()) + 1,), -1, dtype=torch.long, device=device)
+    first.scatter_reduce_(
+        0, cell, torch.arange(cell.shape[0], device=device), "amin", include_self=False
+    )
+    feats = out.feature_tensor
+    assert not torch.equal(feats, feats[first[cell]])
+
+
+def test_stage3_quarter_taps_share_the_encoders_rows(device):
+    m = MinkUNetAttention(encoding_range=64, stage3=True).to(device).eval()
+    xs, _ = scene(device)
+    with torch.no_grad():
+        taps = m(xs, None, ("enc2", "dec_quarter")).taps
+    assert as_pairs(taps["dec_quarter"].coordinate_tensor) == as_pairs(
+        taps["enc2"].coordinate_tensor
+    )
+    assert {t.feature_tensor.shape[1] for t in taps.values()} == {m.tap_dim("enc2")}
+
+
+def test_qk_norm_flash_and_dense_paths_agree(device):
+    torch.manual_seed(0)
+    flash = MinkUNetAttention(encoding_range=64, qk_norm=True, bottleneck_depth=2).to(device)
+    dense = MinkUNetAttention(
+        encoding_range=64, qk_norm=True, bottleneck_depth=2, flash_attention=False
+    ).to(device)
+    dense.load_state_dict(flash.state_dict())
+    xs, _ = scene(device)
+    with torch.no_grad():
+        a, b = flash.eval()(xs).out, dense.eval()(xs).out
+    assert torch.equal(a.coordinate_tensor, b.coordinate_tensor)
+    # flash runs q, k and v in fp16
+    torch.testing.assert_close(a.feature_tensor, b.feature_tensor, rtol=2e-2, atol=2e-2)
+
+
+def test_the_plain_decoder_emits_on_the_input_rows(device):
+    m = MinkUNetAttention(encoding_range=64, decoder="plain").to(device).eval()
+    xs, removed = scene(device)
+    with torch.no_grad():
+        b = m(xs, None, ("dec_half",))
+    assert as_pairs(b.out.coordinate_tensor) == as_pairs(xs.coordinate_tensor)
+    with pytest.raises(ValueError, match="inject_at='input'"):
+        m(xs, Injection([InjectionGroup("enc0", [removed], "masked", 1)]))
+
+
+def _module(**backbone):
     random.seed(0)
     torch.manual_seed(0)
-
-    class Recording(MinkUNetAttention):
-        def forward(self, xs, inject=None, taps=()):
-            precision_flag.append(torch.is_autocast_enabled("cuda"))
-            return super().forward(xs, inject, taps)
-
     return SslModule(
-        backbone=Recording(encoding_range=64),
+        backbone=MinkUNetAttention(encoding_range=64, **backbone),
         terms={
             "dino": DinoTerm(
                 score_injected=True, proj_head={"hidden_dim": 32, "output_dim": 16, "n_layers": 2}
@@ -127,38 +228,33 @@ def _module(precision_flag: list):
     )
 
 
-@pytest.mark.parametrize("precision", ["32-true", "bf16-mixed"])
-def test_hybrid_plus_charge_trains_on_the_real_backbone_and_teacher_shares_precision(
-    shared_tmp, precision
-):
-    """One epoch of the real model through the Trainer, at both precisions. The teacher runs
-    through ``ctx.module(teacher=True)`` so under bf16-mixed it autocasts exactly as the
-    student does -- recorded inside the backbone's forward, since the output dtype cannot
-    tell you (README, "The GPU suites")."""
+@pytest.mark.parametrize(
+    "inject_at, decoder",
+    [("skips", "unet"), ("input", "unet"), ("input", "plain"), ("input", "none")],
+)
+def test_hybrid_plus_charge_trains_on_the_real_backbone(shared_tmp, inject_at, decoder):
+    """Three steps of the real model through the Trainer at `32-true`, the one precision
+    `MinkUNetAttention` runs at, for every place a token can enter. The masked token moving off
+    its initial value is the gradient having reached it."""
     from lightning_fabric import Fabric
 
     from wcfm.engine.trainer import Trainer
 
     from .test_engine import cfg
 
-    flags: list[bool] = []
-    module = _module(flags)
-    fabric = Fabric(accelerator="cuda", devices=1, precision=precision)
+    module = _module(decoder=decoder, inject_at=inject_at)
+    token = module.backbone.tokens["enc0__masked"]
+    before = token.detach().clone()
     trainer = Trainer(
-        cfg(shared_tmp, optim__epochs=1, metrics__step_cadence=1, run__precision=precision),
+        cfg(shared_tmp, optim__epochs=1, metrics__step_cadence=1, run__precision="32-true"),
         module,
-        fabric=fabric,
+        fabric=Fabric(accelerator="cuda", devices=1, precision="32-true"),
         loader=batch_loader(steps=3, counts=(300, 250), width=W, height=H, blob=True),
-        run_dir=shared_tmp / f"gpu_{precision}",
+        run_dir=shared_tmp / f"gpu_{inject_at}_{decoder}",
     )
     result = trainer.fit()
     assert result["steps"] == 3 and result["skipped_nonfinite"] == 0
-    assert flags, "the backbone never ran"
-    expect = precision == "bf16-mixed"
-    assert all(f == expect for f in flags), (
-        f"autocast seen inside the backbone: {sorted(set(flags))}; every forward, student and "
-        f"teacher, must agree with run.precision={precision}"
-    )
+    assert not torch.equal(token.detach().cpu(), before.cpu()), "the token received no gradient"
 
 
 def test_region_scene_charge_target_alignment(device):
@@ -196,7 +292,7 @@ def test_term_gradients_decomposes_the_objective_on_the_real_backbone(device):
     """
     from wcfm.eval.gradients import gradient_report
 
-    module = _module([]).to(device)
+    module = _module().to(device)
     batch = make_batch(counts=(300, 250), width=W, height=H, blob=True).to(device)
 
     grads = module.term_gradients(batch)

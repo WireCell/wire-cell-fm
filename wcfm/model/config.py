@@ -48,6 +48,22 @@ class MinkUNetConfig:
     # means the backbone cannot inject and can only run the plain dino objective. The list is
     # what makes injection a declared capability rather than an `inspect.signature` sniff.
     inject_roles: list[str] = field(default_factory=lambda: ["masked"])
+    # What follows the bottleneck: `unet` (the decoder with skips), `plain` (the decoder without
+    # the skip features) or `none` (no decoder: each pixel takes its parents' features at the
+    # `upcast` taps). The class docstring has the details.
+    decoder: str = "unet"
+    upcast: list[str] = field(default_factory=lambda: ["bottleneck_attn"])
+    # Where mask tokens enter: `skips` (only the decoder reads them) or `input` (after `conv0`,
+    # through the whole encoder). Any decoder but `unet` needs `input`.
+    inject_at: str = "skips"
+    # Bottleneck blocks stacked in sequence.
+    bottleneck_depth: int = 1
+    # A third strided stage before the bottleneck (stride 8); a decoder gains the stage back.
+    stage3: bool = False
+    # Layer-normalise q and k in the bottleneck attention. Off here and in the constructor, so a
+    # checkpoint whose stored config predates the field rebuilds without the norms, as it was
+    # trained; `conf/model/backbone/attn_mae.yaml` turns it on for every new run.
+    qk_norm: bool = False
 
 
 @dataclass
@@ -199,7 +215,14 @@ class DinoTermConfig:
     proj_head: ProjHeadConfig | None = field(default_factory=ProjHeadConfig)
     center_momentum: float = 0.9
     use_centering: bool = True
+    # > 0: that many Sinkhorn-Knopp iterations replace the teacher softmax and centring, which
+    # must then be off (`use_centering: false`).
+    sinkhorn_iters: int = 0
     teacher_temp: float = 0.07
+    # Set both or neither: the teacher temperature rises linearly from `teacher_temp_start` to
+    # `teacher_temp` over the first `teacher_temp_warmup` fraction of the run's steps.
+    teacher_temp_start: float | None = None
+    teacher_temp_warmup: float = 0.0
     student_temp: float = 0.1
     cov_penalty: PenaltyConfig = field(default_factory=PenaltyConfig)
     var_penalty: VarPenaltyConfig = field(default_factory=VarPenaltyConfig)

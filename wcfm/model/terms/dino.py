@@ -46,13 +46,21 @@ class DinoTerm(Term):
         proj_head: dict | None | object = _DEFAULT,
         center_momentum: float = 0.9,
         use_centering: bool = True,
+        sinkhorn_iters: int = 0,
         teacher_temp: float = 0.07,
+        teacher_temp_start: float | None = None,
+        teacher_temp_warmup: float = 0.0,
         student_temp: float = 0.1,
         cov_penalty: dict | None = None,
         var_penalty: dict | None = None,
     ):
         super().__init__(weight=weight)
+        if (teacher_temp_start is None) != (teacher_temp_warmup <= 0.0):
+            raise ValueError("set teacher_temp_start and teacher_temp_warmup > 0 together")
         self.score_injected = bool(score_injected)
+        self._teacher_temp = float(teacher_temp)
+        self._teacher_temp_start = teacher_temp_start
+        self._teacher_temp_warmup = float(teacher_temp_warmup)
         # `proj_head: null` in config removes the head; leaving it unset keeps the default
         # one, so a `DinoTerm()` built in a test has the production shape.
         if proj_head is _DEFAULT:
@@ -64,6 +72,7 @@ class DinoTerm(Term):
         self._loss_kwargs = dict(
             center_momentum=center_momentum,
             use_centering=use_centering,
+            sinkhorn_iters=sinkhorn_iters,
             teacher_temp=teacher_temp,
             student_temp=student_temp,
             use_cov_penalty=bool(cov.get("enabled", False)),
@@ -183,6 +192,7 @@ class DinoTerm(Term):
 
     def compute(self, bundle, head_out, view_idx, plan, teacher, ctx) -> TermOutput:
         assert self.loss is not None, "build() was not called"
+        self.loss.teacher_temp = self.teacher_temp_at(ctx)
         view = plan.views[view_idx]
         s_out: Voxels = head_out
         masked = view.masked_coords
@@ -214,6 +224,7 @@ class DinoTerm(Term):
             loss_sum = out.loss if loss_sum is None else loss_sum + out.loss
             n_pairs += 1
             add("loss_dino", float(out.loss.detach()))
+            add("teacher_temp", self.loss.teacher_temp)
             add("teacher_entropy", out.teacher_entropy)
             add("student_entropy", out.student_entropy)
             add("kl", out.kl)
@@ -227,6 +238,15 @@ class DinoTerm(Term):
         counts["n_pairs"] = 0  # a total, not a mean: the module sums these
         self._last_student_head = s_out.feature_tensor.detach()
         return TermOutput(loss=loss_sum, scalars=scalars, counts=counts)
+
+    def teacher_temp_at(self, ctx: Any) -> float:
+        """The linear warmup over `ctx.extra["total_iters"]`; a ctx without it (an offline
+        pass) gets the final temperature."""
+        if self._teacher_temp_start is None:
+            return self._teacher_temp
+        n = int(self._teacher_temp_warmup * int(ctx.extra.get("total_iters", 0)))
+        frac = min(ctx.step / n, 1.0) if n > 0 else 1.0
+        return self._teacher_temp_start + frac * (self._teacher_temp - self._teacher_temp_start)
 
     def on_step_end(self, ctx: Any) -> None:
         # Gated on configuration (a teacher always exists for this term), never on whether a

@@ -1,0 +1,25 @@
+# @package _global_
+#
+# `dino_ctrl` without a decoder (`model.backbone.decoder: none`): every pixel of `enc0` takes
+# the features of its parent at `bottleneck_attn`, and the DINO head reads that, so the loss
+# trains the encoder alone. 1024 prototypes in place of the default.
+#
+#   env WCFM_REQUEST_MEMORY=40000 WCFM_REQUEST_CPUS=10 wcfm submit +experiment=dino_enconly
+#
+# Everything not set below comes from dino_ctrl.
+
+defaults:
+  - dino_ctrl
+  - _self_
+
+run:
+  name: wcfm_dino2M_ctrl_k1024_enconly
+  save_at: [5]
+
+model:
+  backbone:
+    decoder: none
+  terms:
+    dino:
+      proj_head:
+        output_dim: 1024

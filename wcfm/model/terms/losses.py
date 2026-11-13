@@ -46,10 +46,45 @@ def _img_mean(loss_px: Tensor, batch_idx: Tensor, B: int) -> Tensor | None:
     return per_img[valid].mean() if valid.any() else None
 
 
+def _all_reduce(x: Tensor, op: str = "sum") -> Tensor:
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(x, op=dist.ReduceOp.MAX if op == "max" else dist.ReduceOp.SUM)
+    return x
+
+
+@torch.no_grad()
+def sinkhorn_knopp(logits: Tensor, temp: float, n_iters: int) -> Tensor:
+    """SwAV's Sinkhorn-Knopp over the rows of `logits` (N pixels x K prototypes): `n_iters`
+    alternations of "each prototype holds 1/K of the mass" and "each pixel holds 1/N", started
+    from `exp(logits / temp)`. Each returned row sums to 1. A few iterations leave the
+    prototype marginals near uniform rather than exact. Runs in fp32 and in place; a constant
+    added to `logits` changes nothing. Pinned by `tests/test_dino_sinkhorn.py`.
+
+    Under DDP the pixels are those of every rank, so the prototypes are balanced over the step
+    rather than over one rank's share of it. It runs `n_iters + 3` all-reduces: every rank must
+    call it the same number of times per step, including a rank with no pixels.
+    """
+    Q = logits.float() / temp
+    K = Q.shape[1]
+    peak = Q.max().reshape(1) if Q.numel() else Q.new_full((1,), -torch.inf)
+    Q.sub_(_all_reduce(peak, "max")).exp_()
+    N = _all_reduce(Q.new_full((1,), Q.shape[0]))
+    Q.div_(_all_reduce(Q.sum().reshape(1)))
+    for _ in range(int(n_iters)):
+        Q.div_(_all_reduce(Q.sum(dim=0)).clamp_min_(1e-30)).div_(K)
+        Q.div_(Q.sum(dim=1, keepdim=True)).div_(N)
+    return Q.mul_(N)
+
+
 class PixelDINOLoss(nn.Module):
-    """Cross-entropy between `softmax(teacher / tau_t)` and `log_softmax(student / tau_s)` per
-    matched pixel, with the D-dim feature vector treated as logits, reduced per image and then
-    over the batch."""
+    """Cross-entropy between the teacher's target distribution and `log_softmax(student /
+    tau_s)` per matched pixel, with the D-dim feature vector treated as logits, reduced per image
+    and then over the batch.
+
+    The teacher's targets are `softmax(teacher / tau_t)` after centring, or, when
+    `sinkhorn_iters > 0`, `sinkhorn_knopp` over the pair's matched pixels on every rank, which
+    takes the place of centring.
+    """
 
     def __init__(
         self,
@@ -65,8 +100,14 @@ class PixelDINOLoss(nn.Module):
         use_var_penalty: bool = False,
         var_penalty_weight: float = 1.0,
         var_gamma: float = 1.0,
+        sinkhorn_iters: int = 0,
     ):
         super().__init__()
+        if sinkhorn_iters > 0 and use_centering:
+            raise ValueError(
+                "sinkhorn_iters > 0 replaces centring; set use_centering=false as well"
+            )
+        self.sinkhorn_iters = int(sinkhorn_iters)
         self.center_momentum = float(center_momentum)
         self.use_centering = bool(use_centering)
         self.teacher_temp = float(teacher_temp)
@@ -96,12 +137,14 @@ class PixelDINOLoss(nn.Module):
             s = F.normalize(s, dim=-1)
             t = F.normalize(t, dim=-1)
 
-        t_prob = F.softmax(t / self.teacher_temp, dim=-1)
+        if self.sinkhorn_iters > 0:
+            t_prob = sinkhorn_knopp(t, self.teacher_temp, self.sinkhorn_iters)
+        else:
+            t_prob = F.softmax(t / self.teacher_temp, dim=-1)
         s_logp = F.log_softmax(s / self.student_temp, dim=-1)
-        t_logp = F.log_softmax(t / self.teacher_temp, dim=-1)
         loss = -(t_prob * s_logp).sum(dim=-1)  # H(P_t, P_s)
         s_prob = F.softmax(s / self.student_temp, dim=-1)
-        t_ent_px = -(t_prob * t_logp).sum(dim=-1)
+        t_ent_px = -torch.xlogy(t_prob, t_prob).sum(dim=-1)
         s_ent_px = -(s_prob * s_logp).sum(dim=-1)
         kl_px = loss - t_ent_px
 

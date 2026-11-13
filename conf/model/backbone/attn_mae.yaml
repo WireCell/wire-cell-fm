@@ -4,3 +4,7 @@
 # Values not listed here are the schema defaults in wcfm/model/config.py.
 defaults:
   - base_minkunet
+
+# On here rather than in the schema: a checkpoint written before the field existed must rebuild
+# from its stored config with the schema default, without the norms.
+qk_norm: true
