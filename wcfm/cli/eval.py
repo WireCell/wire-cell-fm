@@ -55,9 +55,8 @@ submit options:
   --data=NAME           forwarded to every extract node (see extract options)
   --batch-size=N        forwarded to every extract node (see extract options)
   --retry=N             Condor RETRY per node    (default: 2)
-  --maxjobs=N           extract nodes to run at once (default: unthrottled). Each holds every
-                        pixel's features in host RAM and doubles that concatenating them, so a
-                        wide backbone needs this to keep one node's jobs inside its memory
+  --maxjobs=N           extract nodes to run at once (default: unthrottled); probe nodes
+                        are never throttled, so each epoch's probes start as its extract ends
   --dry-run             write the DAG, submit nothing
 
 merge/compare options:
@@ -557,6 +556,7 @@ def _submit(argv: list[str]) -> int:
         rows=flags.get("rows", "all"),
         max_images=int(flags.get("max-images", 10000)),
         retry=int(flags.get("retry", 2)),
+        max_extract=int(flags.get("maxjobs", 0)),
         extract_flags=tuple(f"--{k}={flags[k]}" for k in ("data", "batch-size") if k in flags),
     )
 
@@ -588,17 +588,14 @@ def _submit(argv: list[str]) -> int:
             path.chmod(0o755)
     print(f"\nwrote {len(files)} files under {dag_path.parent}")
 
-    # Throttles the whole DAG, which in practice throttles the extract nodes: the probes are
-    # their children and one CPU slot each.
-    throttle = ["-maxjobs", flags["maxjobs"]] if flags.get("maxjobs") else []
     if not shutil.which("condor_submit_dag"):
         print(
             "wcfm eval submit: condor_submit_dag not on PATH; submit from a login node with\n"
-            f"  condor_submit_dag {' '.join(throttle)} {dag_path}".replace("  ", " "),
+            f"  condor_submit_dag {dag_path}",
             file=sys.stderr,
         )
         return 2
-    completed = subprocess.run(["condor_submit_dag", *throttle, str(dag_path)], check=False)
+    completed = subprocess.run(["condor_submit_dag", str(dag_path)], check=False)
     print(f"\nWatch with:  condor_q -nobatch ; tail -F {dag_path.parent}/logs/*.out")
     return completed.returncode
 

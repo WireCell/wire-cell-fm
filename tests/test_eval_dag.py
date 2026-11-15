@@ -13,6 +13,7 @@ the real one.
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from pathlib import Path
 
@@ -121,6 +122,18 @@ def test_every_working_node_retries_and_merge_cannot_fail_the_dag(tmp_path):
     # failing a campaign's completed probe jobs over it would be the wrong trade.
     assert "SCRIPT POST merge" in dag
     assert "RETRY merge" not in dag
+
+
+def test_maxjobs_throttles_only_the_extract_nodes(tmp_path):
+    def dag_of(plan):
+        return next(v for k, v in build_dag(plan).items() if k.name == "eval.dag")
+
+    plan = _plan(tmp_path)
+    dag = dag_of(dataclasses.replace(plan, max_extract=1))
+    categorised = [ln.split()[1] for ln in dag.splitlines() if ln.startswith("CATEGORY ")]
+    assert categorised and all(n.startswith("extract_ep") for n in categorised)
+    assert "MAXJOBS extract 1" in dag.splitlines()
+    assert "MAXJOBS" not in dag_of(plan)
 
 
 def test_the_pre_script_compares_checkpoint_hashes_not_timestamps(tmp_path):

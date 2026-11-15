@@ -101,6 +101,10 @@ class DagPlan:
     max_images: int
     device: str = "cuda"
     retry: int = 2
+    #: Extract nodes running at once; 0 is unthrottled. Written as a DAG category, so the
+    #: probe nodes stay unthrottled: a DAG-wide `condor_submit_dag -maxjobs` would queue each
+    #: epoch's probes behind the remaining extracts.
+    max_extract: int = 0
     extract_flags: tuple[str, ...] = ()
     #: The repo's identity as Condor `environment` assignments, from
     #: `jobpack.git_environment`. The workers have no `.git`, so without this every eval run's
@@ -272,6 +276,7 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
             f"PRE_SKIP {ex_name} 1",
             f"RETRY {ex_name} {plan.retry}",
             f"RETRY {pr_name} {plan.retry}",
+            f"CATEGORY {ex_name} extract",
             "",
         ]
         probe_nodes.append(pr_name)
@@ -301,6 +306,8 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
         f"SCRIPT POST {merge_name} {dag_dir / 'always_ok.sh'}",
         "",
     ]
+    if plan.max_extract:
+        lines += [f"MAXJOBS extract {plan.max_extract}", ""]
 
     out[dag_dir / "eval.dag"] = "\n".join(lines)
     out[dag_dir / "stale.sh"] = _STALE_SH
