@@ -43,7 +43,7 @@ from wcfm.data.voxels import Batch
 from wcfm.engine.protocol import StepContext, StepOutput
 
 from ..augment.transforms import FeatureLogTransform
-from ..augment.views import Augment
+from ..augment.views import Augment, ViewPlan
 from ..backbones.base import Backbone, FeatureBundle, Injection
 from ..terms.base import TeacherOutput, Term
 
@@ -311,10 +311,10 @@ class SslModule(nn.Module):
         if self.teacher_backbone is not None:
             needs = [n for n, t in self.terms.items() if t.requires_teacher]
             with torch.no_grad():
-                teacher = [
-                    ctx.module(v.clean, None, self.required_taps, teacher=True, terms=needs)
-                    for v in plan.globals
-                ]
+                taps = self.required_taps
+                teacher = _per_clean_view(
+                    plan, lambda c: ctx.module(c, None, taps, teacher=True, terms=needs)
+                )
             self._last_teacher = teacher[0][0]
         for term in self.terms.values():
             term.begin_step(plan, teacher)
@@ -445,10 +445,9 @@ class SslModule(nn.Module):
         if self.teacher_backbone is not None:
             needs = [n for n, t in self.terms.items() if t.requires_teacher]
             with torch.no_grad():
-                teacher = [
-                    self(v.clean, None, self.required_taps, teacher=True, terms=needs)
-                    for v in plan.globals
-                ]
+                teacher = _per_clean_view(
+                    plan, lambda c: self(c, None, self.required_taps, teacher=True, terms=needs)
+                )
         for term in self.terms.values():
             term.begin_step(plan, teacher)
 
@@ -598,3 +597,13 @@ class SslModule(nn.Module):
             epochs=1,
             steps_per_epoch=total,
         )
+
+
+def _per_clean_view(plan: ViewPlan, encode) -> list:
+    """`encode(view.clean)` for every global view, run once per distinct clean image: the
+    `copies` of `Augment` share one, and their teacher outputs are identical."""
+    done: dict[int, Any] = {}
+    for v in plan.globals:
+        if id(v.clean) not in done:
+            done[id(v.clean)] = encode(v.clean)
+    return [done[id(v.clean)] for v in plan.globals]

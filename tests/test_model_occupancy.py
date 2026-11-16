@@ -373,3 +373,17 @@ def test_charge_refuses_an_injection_site_the_backbone_lacks():
             augment=Augment(masker=region_masker()),
             teacher=NoTeacher(),
         )
+
+
+def test_copies_share_one_teacher_encode():
+    """The copies share their clean image, so the teacher runs on it once, not once per copy."""
+    from wcfm.model.modules.ssl import _per_clean_view
+
+    aug = Augment(
+        masker=region_masker(image_w=64, image_h=48, cell_w=8, cell_h=8, build_candidates=False),
+        copies=3,
+    )
+    plan = aug(make_batch(width=64, height=48))
+    calls = []
+    out = _per_clean_view(plan, lambda c: calls.append(c) or len(calls))
+    assert len(calls) == 1 and out == [1, 1, 1]
