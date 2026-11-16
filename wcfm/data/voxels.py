@@ -37,6 +37,23 @@ def voxels_from(coords: Tensor, feats: Tensor, offsets: Tensor) -> Voxels:
     )
 
 
+def batched_keys(*parts: tuple[Tensor, Tensor]) -> list[Tensor]:
+    """One integer per `(image, x, y)` row, comparable across every `(coords, offsets)` part.
+
+    The grid is sized from the largest coordinate of all the parts together: a coordinate past
+    one part's extent would otherwise wrap onto another row's key.
+    """
+    nonempty = [c for c, _ in parts if c.shape[0]]
+    W = int(max(int(c[:, 0].max()) for c in nonempty)) + 1 if nonempty else 1
+    H = int(max(int(c[:, 1].max()) for c in nonempty)) + 1 if nonempty else 1
+    out = []
+    for c, offsets in parts:
+        counts = (offsets[1:] - offsets[:-1]).to(c.device)
+        b = torch.repeat_interleave(torch.arange(counts.shape[0], device=c.device), counts)
+        out.append(b * (H * W) + c[:, 1].long() * W + c[:, 0].long())
+    return out
+
+
 def upcast(coarse: Voxels, fine: Voxels, factor: int) -> Tensor:
     """`coarse`'s features at every row of `fine`, in `fine`'s row order: each row takes the
     features of its parent, the `coarse` row in the same image at the fine coordinate
@@ -50,21 +67,12 @@ def upcast(coarse: Voxels, fine: Voxels, factor: int) -> Tensor:
     feats = coarse.feature_tensor
     if fc.shape[0] == 0:
         return feats.new_zeros(0, feats.shape[1])
-    device = fc.device
     fc = torch.div(fc, factor, rounding_mode="floor") if factor > 1 else fc
     cc = coarse.coordinate_tensor
     if cc.shape[0] == 0:
         raise RuntimeError(f"{fc.shape[0]} rows have no parent: the coarse map is empty")
-    W = int(max(int(fc[:, 0].max()), int(cc[:, 0].max()))) + 1
-    H = int(max(int(fc[:, 1].max()), int(cc[:, 1].max()))) + 1
-
-    def keys(c: Tensor, offsets: Tensor) -> Tensor:
-        counts = (offsets[1:] - offsets[:-1]).to(device)
-        b = torch.repeat_interleave(torch.arange(counts.shape[0], device=device), counts)
-        return b * (H * W) + c[:, 1].long() * W + c[:, 0].long()
-
-    c_sorted, c_order = keys(cc, coarse.offsets).sort()
-    f_keys = keys(fc, fine.offsets)
+    c_keys, f_keys = batched_keys((cc, coarse.offsets), (fc, fine.offsets))
+    c_sorted, c_order = c_keys.sort()
     pos = torch.searchsorted(c_sorted, f_keys).clamp(max=c_sorted.shape[0] - 1)
     n_missed = int((c_sorted[pos] != f_keys).sum())
     if n_missed:

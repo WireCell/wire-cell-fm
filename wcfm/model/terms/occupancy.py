@@ -48,6 +48,8 @@ from torch import Tensor
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.modules.sparse_conv import SparseConv2d
 
+from wcfm.data.voxels import batched_keys
+
 from ..augment.views import Augment, View, ViewPlan
 from ..backbones.base import Backbone, FeatureBundle, Injection, InjectionGroup
 from ..backbones.blocks import ResidualSparseBlock2D
@@ -374,12 +376,5 @@ def occupied_at(rows: Voxels, clean: Voxels, stride: int) -> Tensor:
     if rc.shape[0] == 0:
         return torch.zeros(0, dtype=torch.bool, device=rc.device)
     cc = torch.div(clean.coordinate_tensor.long(), stride, rounding_mode="floor")
-    W = int(max(int(rc[:, 0].max()), int(cc[:, 0].max()) if cc.numel() else 0)) + 1
-    H = int(max(int(rc[:, 1].max()), int(cc[:, 1].max()) if cc.numel() else 0)) + 1
-
-    def keys(c: Tensor, offsets: Tensor) -> Tensor:
-        counts = (offsets[1:] - offsets[:-1]).to(c.device)
-        b = torch.repeat_interleave(torch.arange(counts.shape[0], device=c.device), counts)
-        return b * (H * W) + c[:, 1] * W + c[:, 0]
-
-    return torch.isin(keys(rc, rows.offsets), keys(cc, clean.offsets))
+    row_keys, clean_keys = batched_keys((rc, rows.offsets), (cc, clean.offsets))
+    return torch.isin(row_keys, clean_keys)
