@@ -513,6 +513,19 @@ def _submit(argv: list[str]) -> int:
         print(f"wcfm eval submit: no checkpoint_epoch*.pt in {run_dir}", file=sys.stderr)
         return 2
 
+    # A probe tap extraction does not write fails only on the probes nodes, after every GPU
+    # extraction has run.
+    taps = {t for t in flags.get("taps", "").split(",") if t}
+    probe_parts = {p for t in flags.get("probe-taps", "out").split(",") for p in t.split("+") if p}
+    unextracted = sorted(probe_parts - taps - {"out"})
+    if unextracted:
+        print(
+            f"wcfm eval submit: --probe-taps names {unextracted}, which --taps does not extract; "
+            "add them to --taps (a strided tap also needs --upcast)",
+            file=sys.stderr,
+        )
+        return 2
+
     # The checkout is packaged, not read in place: every node transfers one archive of this
     # tree (`wcfm/cli/jobpack.py`) and unpacks it into its own scratch. A DAG's later nodes
     # start hours after submission, and Condor reads `transfer_input_files` at job start, so
