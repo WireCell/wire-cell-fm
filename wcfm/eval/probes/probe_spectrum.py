@@ -197,7 +197,7 @@ def run_one(store_root: Path, args) -> dict:
     sources = list(prov.sources)
     source = args.source if args.source in sources else sources[0]
 
-    print(f"\n=== {run_label(store_root, source)} ===")
+    print(f"\n=== {run_label(store_root, source, args.tap)} ===")
     print(f"  taps={prov.taps}  branches={sources}  rows={prov.rows}")
 
     entry: dict = {
@@ -297,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
     args = probe_argv("spectrum", argv, default_out="spectrum.json", extra=extra)
     results = {}
     for store in args.features:
-        results[run_label(store, args.source)] = run_one(Path(store), args)
+        results[run_label(store, args.source, args.tap)] = run_one(Path(store), args)
         write_json(results, args.out)
     write_json(results, args.out)
     print(f"\nwrote {args.out}")

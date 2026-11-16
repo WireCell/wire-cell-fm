@@ -215,7 +215,7 @@ def run_one(store_root: Path, args) -> dict:
         store_root, source=args.source, tap=args.tap, eval_set_root=args.eval_set_root
     )
     fx.require("pixel_labels", "pixel_energyfrac")
-    print(f"\n=== {run_label(store_root, args.source)} ===")
+    print(f"\n=== {run_label(store_root, args.source, args.tap)} ===")
 
     entry = run_header(fx, fx.pool_spec.seed, fx.pool_spec.overlap_train_per_class)
     entry["metrics_run"] = ["overlap"]
@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     args = probe_argv("overlap", argv, default_out="overlap.json")
     results = {}
     for store in args.features:
-        results[run_label(store, args.source)] = run_one(Path(store), args)
+        results[run_label(store, args.source, args.tap)] = run_one(Path(store), args)
         write_json(results, args.out)
     write_json(results, args.out)
     print(f"\nwrote {args.out}")

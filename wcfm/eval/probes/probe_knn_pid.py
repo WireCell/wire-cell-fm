@@ -145,7 +145,7 @@ def run_one(store_root: Path, args) -> dict:
     fx0 = fxs[sources[0]]
     fx0.require("pixel_labels")
 
-    print(f"\n=== {run_label(store_root, sources[0])} ===")
+    print(f"\n=== {run_label(store_root, sources[0], args.tap)} ===")
     pixel_labels = fx0.truth["pixel_labels"]
     n_truth = int((pixel_labels != 0).sum())
     print(
@@ -158,7 +158,8 @@ def run_one(store_root: Path, args) -> dict:
     # same `default_rng(seed)` and the same per-image cap at extraction time.
     pool = fx0.pool("knn_pool")
     if len(pool) < 2:
-        return {run_label(store_root, sources[0]): {"knn_pixel": {"error": "empty knn pool"}}}
+        label = run_label(store_root, sources[0], args.tap)
+        return {label: {"knn_pixel": {"error": "empty knn pool"}}}
     pix_cls = _label_to_class(pixel_labels)[pool]
     max_per_class = fx0.pool_spec.knn_max_per_class
     cap = (
@@ -224,7 +225,7 @@ def run_one(store_root: Path, args) -> dict:
         header = run_header(fxs[src], fx0.pool_spec.seed, max_per_class)
         header.pop("seed", None)
         header.pop("pool_per_class", None)
-        entries[run_label(store_root, src)] = {
+        entries[run_label(store_root, src, args.tap)] = {
             **header,
             "metrics_run": ["knn_pixel"],
             "knn_pixel": {
@@ -252,7 +253,7 @@ def run_one(store_root: Path, args) -> dict:
             joined = "  ".join(f"{src} {pur[src][k][0]:.3f}" for src in sources)
             print(f"    purity k={k:<3d} {joined}")
         for src in sources:
-            entries[run_label(store_root, src)]["knn_pixel"]["purity"] = {
+            entries[run_label(store_root, src, args.tap)]["knn_pixel"]["purity"] = {
                 str(k): pur[src][k][0] for k in ks
             }
 
