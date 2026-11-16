@@ -276,7 +276,8 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
             # checkpoint's hash. On its own a non-zero PRE fails the node and burns its
             # retries; `PRE_SKIP` is what makes that exit code "skip the job, mark the node
             # done", so the probes below it still run.
-            f"SCRIPT PRE {ex_name} {dag_dir / 'stale.sh'} {ckpt} {store}",
+            f"SCRIPT PRE {ex_name} {dag_dir / 'stale.sh'} {ckpt} {store} {plan.taps or '-'} "
+            f"{int(any(f.startswith('--upcast') for f in plan.extract_flags))}",
             f"PRE_SKIP {ex_name} 1",
             f"RETRY {ex_name} {plan.retry}",
             f"RETRY {pr_name} {plan.retry}",
@@ -324,16 +325,20 @@ _STALE_SH = """#!/bin/bash
 #
 # Skip an extraction that is already current. Written by `wcfm eval submit`.
 #
-#   $1 checkpoint   $2 store directory
+#   $1 checkpoint   $2 store directory   $3 taps requested (comma-separated, `-` for none)
+#   $4 1 when the taps are to be upcast
 #
 # An extraction is current when provenance.json's checkpoint_sha256 matches this checkpoint's
-# bytes, and by nothing else. Comparing modification times is defeated by a re-run against an
-# unchanged checkpoint, and waiting for a file to stop growing is defeated by a slow GPFS write.
+# bytes and it holds every requested tap, upcast when asked. Comparing modification times is
+# defeated by a re-run against an unchanged checkpoint, and waiting for a file to stop growing
+# is defeated by a slow GPFS write.
 #
 # Exit 1 = do not run the node: eval.dag declares PRE_SKIP for this exit code.
 set -u
 ckpt=$1
 store=$2
+taps=${3:--}
+upcast=${4:-0}
 prov="${store}/provenance.json"
 
 [ -f "$prov" ] || { echo "no ${prov}: extracting"; exit 0; }
@@ -341,10 +346,18 @@ prov="${store}/provenance.json"
 recorded=$(python3 -c '
 import json,sys
 try:
-    print(json.load(open(sys.argv[1])).get("checkpoint_sha256",""))
+    p = json.load(open(sys.argv[1]))
 except Exception:
-    print("")
-' "$prov")
+    print(""); sys.exit()
+want = [t for t in sys.argv[2].split(",") if t and t != "-"]
+strides = p.get("tap_strides") or {}
+if any(t not in (p.get("taps") or []) for t in want):
+    print("missing-tap")
+elif sys.argv[3] == "1" and any(int(strides.get(t, 1)) != 1 for t in want):
+    print("not-upcast")
+else:
+    print(p.get("checkpoint_sha256", ""))
+' "$prov" "$taps" "$upcast")
 actual=$(sha256sum "$ckpt" | cut -d" " -f1)
 
 if [ -n "$recorded" ] && [ "$recorded" = "$actual" ]; then
