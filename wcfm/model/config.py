@@ -64,6 +64,8 @@ class MinkUNetConfig:
     # checkpoint whose stored config predates the field rebuilds without the norms, as it was
     # trained; `conf/model/backbone/attn_mae.yaml` turns it on for every new run.
     qk_norm: bool = False
+    # An injection site at `enc2` (stride 4), with a token per role; needs `stage3`.
+    inject_enc2: bool = False
 
 
 @dataclass
@@ -155,6 +157,8 @@ class AugmentConfig:
     _target_: str = "wcfm.model.augment.Augment"
     cropper: Any = None
     masker: Any = None
+    # Independently masked copies of the whole image per step; needs a masker and no cropper.
+    copies: int = 1
 
 
 @dataclass
@@ -232,6 +236,8 @@ class DinoTermConfig:
 class ChargeTermConfig:
     _target_: str = "wcfm.model.terms.ChargeTerm"
     weight: float = 0.1
+    # Taps the `masked` token is injected at; empty means every stride-1 injection site.
+    inject_taps: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -272,6 +278,11 @@ class OccupancyTermConfig:
     weight: float = 1.0
     alpha: float = 0.25
     gamma: float = 2.0
+    # `masker`: the masker's enumerated candidates. `grown`: candidates grown from the
+    # bottleneck's coordinates, every `dec_half` row scored against the unmasked image.
+    candidates: str = "masker"
+    # Grown mode only: 3x3 dilations at stride 2 after the upsampling stages, counting the last.
+    grow_iters: int = 1
 
 
 # ---------------------------------------------------------------------------------- module

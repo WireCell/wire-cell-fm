@@ -143,7 +143,27 @@ class Features:
         """
         if self.store is None:
             raise RuntimeError("no feature store behind this object")
-        return self.store.event_means(self.source, self.tap)
+        parts = [self.store.event_means(self.source, t) for t in self.tap.split("+")]
+        return parts[0] if len(parts) == 1 else np.concatenate(parts, axis=1)
+
+
+class ColumnConcat:
+    """Row-aligned feature blocks presented as one, `tap="a+b"`: indexing takes the same rows
+    of every block and stacks the columns, so only the indexed rows are ever read. Probes
+    index a pool first, which is what keeps this cheap; nothing reads the whole thing."""
+
+    def __init__(self, blocks: list[np.ndarray]):
+        if len({len(b) for b in blocks}) != 1:
+            raise SystemExit(f"blocks to concatenate differ in rows: {[len(b) for b in blocks]}")
+        self.blocks = blocks
+        self.shape = (len(blocks[0]), sum(int(b.shape[1]) for b in blocks))
+        self.dtype = blocks[0].dtype
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def __getitem__(self, idx) -> np.ndarray:
+        return np.concatenate([np.asarray(b[idx]) for b in self.blocks], axis=-1)
 
 
 def load_features(
@@ -159,6 +179,8 @@ def load_features(
     `store_root` is a checkpoint's feature directory, `<run>/features/epoch<N>/`. The eval set
     defaults to `<store_root>/../eval_set`, which is where `wcfm eval extract` puts
     it, and is passed explicitly when a sweep shares one set across runs.
+
+    `tap` may join stride-1 taps with `+`, `"out+dec_half"`, to score their columns side by side.
 
     Nothing here is decompressed and the feature block is never copied: it is mmapped, and
     every consumer indexes a pool first, so the fp16->fp32 cast lands on the small slice. That
@@ -178,22 +200,25 @@ def load_features(
             f"{store_root} holds no {source!r} features; it has {prov.sources}. A run trained "
             "without a teacher has only a student branch."
         )
-    if tap not in prov.taps:
-        raise SystemExit(f"{store_root} has no tap {tap!r}; it has {prov.taps}")
+    parts = tap.split("+")
+    for part in parts:
+        if part not in prov.taps:
+            raise SystemExit(f"{store_root} has no tap {part!r}; it has {prov.taps}")
 
     es_root = Path(eval_set_root) if eval_set_root else store_root.parent / "eval_set"
     eval_set = EvalSet.load(es_root)
     eval_set.verify(es_root)
 
-    feat = store.features(source, tap)
-    stride = int(prov.tap_strides.get(tap, 1))
-    if stride != 1:
-        raise SystemExit(
-            f"tap {tap!r} has stride {stride}, so its rows sit on a coarser grid than the "
-            "per-pixel truth and cannot be joined to it positionally. The probe suite scores "
-            f"stride-1 taps; {store_root}/{tap}.coords.npy carries this tap's own coordinates "
-            "for anything that wants them."
-        )
+    for part in parts:
+        stride = int(prov.tap_strides.get(part, 1))
+        if stride != 1:
+            raise SystemExit(
+                f"tap {part!r} has stride {stride}, so its rows sit on a coarser grid than the "
+                "per-pixel truth and cannot be joined to it positionally. The probe suite scores "
+                "stride-1 taps; extract with --upcast to write it on the pixel rows."
+            )
+    blocks = [store.features(source, part) for part in parts]
+    feat = blocks[0] if len(blocks) == 1 else ColumnConcat(blocks)
 
     pools = store.pools()
     row_index = pools.pop("row_index", None)

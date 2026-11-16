@@ -49,6 +49,9 @@ submit options:
   --stages=pid,knn,...  which probes             (default: every stage)
   --sources=a,b         branches to extract      (default: student,teacher)
   --taps=a,b            extra taps               (default: none)
+  --probe-taps=a,b      taps the probes score, `+` joins taps (out+dec_half); a strided
+                        tap needs --upcast. Not `out` goes to probes/<tap>/ (default: out)
+  --upcast              forwarded to every extract node (see extract options)
   --rows=all|pooled     row space                (default: all)
   --max-images=N        cap on EVENTS            (default: 10000)
   --eval-set-root=P     share an eval set across runs
@@ -72,6 +75,8 @@ extract options:
   --epochs=1,5,10     which checkpoints (default: all in checkpoints/, latest.pt excluded)
   --sources=a,b       branches to write            (default: student,teacher; missing dropped)
   --taps=a,b          named intermediates as well as the final map  (default: none)
+  --upcast            write strided taps on the pixel rows, each pixel taking its parent's
+                      features, so the probes can score them (default: own coordinates)
   --max-images=N      cap on EVENTS, not batches   (default: 10000)
   --batch-size=N      (default: the run's PER-RANK batch, because extraction is one process;
                       warpconvnet's hash table packs the batch index into 9 bits and refuses
@@ -316,6 +321,7 @@ def _extract(argv: list[str]) -> int:
             loader=loader,
             sources=sources,
             taps=taps,
+            upcast=bool(flags.get("upcast")),
             max_images=max_images,
             rows=rows,
             pool_per_class=pool_per_class,
@@ -551,13 +557,16 @@ def _submit(argv: list[str]) -> int:
         checkpoints=checkpoints,
         eval_set_root=Path(flags.get("eval-set-root", out_root / "eval_set")),
         stages=flags.get("stages", "pid,knn,overlap,instance,vertex,event,spectrum"),
+        probe_taps=flags.get("probe-taps", "out"),
         sources=flags.get("sources", "student,teacher"),
         taps=flags.get("taps", ""),
         rows=flags.get("rows", "all"),
         max_images=int(flags.get("max-images", 10000)),
         retry=int(flags.get("retry", 2)),
         max_extract=int(flags.get("maxjobs", 0)),
-        extract_flags=tuple(f"--{k}={flags[k]}" for k in ("data", "batch-size") if k in flags),
+        extract_flags=tuple(
+            f"--{k}={flags[k]}" for k in ("data", "batch-size", "upcast") if k in flags
+        ),
     )
 
     files = build_dag(plan)

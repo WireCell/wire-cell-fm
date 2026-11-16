@@ -224,7 +224,8 @@ class SslModule(nn.Module):
         """
         for name, term in self.terms.items():
             stride = getattr(term, "READ_STRIDE", None)
-            if stride is None or masker is None:
+            # Grown candidates are labelled from the unmasked image, not from the removed set.
+            if stride is None or masker is None or getattr(term, "grown", False):
                 continue
             for axis in ("cell_w", "cell_h"):
                 cell = getattr(masker, axis, None)

@@ -189,7 +189,7 @@ def test_all_nodes_share_one_eval_set_so_the_epochs_are_comparable(tmp_path):
     for e in (1, 5, 10):
         assert f"'--eval-set-root={root}'" in subs[f"extract_ep{e}.sub"]
         probe_args = re.search(r'arguments += +"(.*)"', subs[f"probes_ep{e}.sub"]).group(1)
-        assert probe_args.split()[-1] == str(root)
+        assert probe_args.split()[5] == str(root)  # the 6th argument of probesjob.sh
 
 
 def test_build_dag_writes_nothing(tmp_path):
@@ -351,3 +351,10 @@ def test_diff_code_compares_the_two_archives(tmp_path, capfd):
     # `capfd`, not `capsys`: `diff` is a subprocess writing to the real file descriptor.
     out = capfd.readouterr().out
     assert "-one" in out and "+two" in out
+
+
+def test_probe_taps_reach_every_probes_node(tmp_path):
+    plan = dataclasses.replace(_plan(tmp_path), probe_taps="out,dec_half,out+dec_half")
+    subs = {k.name: v for k, v in build_dag(plan).items() if k.suffix == ".sub"}
+    probes = [v for k, v in subs.items() if k.startswith("probes_")]
+    assert probes and all(" out,dec_half,out+dec_half\"" in v for v in probes)

@@ -17,13 +17,13 @@ from warpconvnet.geometry.coords.integer import IntCoords  # noqa: E402
 from warpconvnet.geometry.features.cat import CatFeatures  # noqa: E402
 from warpconvnet.geometry.types.voxels import Voxels  # noqa: E402
 
+from wcfm.data.voxels import upcast  # noqa: E402
 from wcfm.model.backbones import (  # noqa: E402
     Injection,
     InjectionGroup,
     MinkUNetAttention,
     inject_into_skip,
     project_coords,
-    upcast,
 )
 
 from .fake_backbone import as_pairs  # noqa: E402
@@ -254,3 +254,29 @@ def test_bottleneck_depth_and_stage3_build_what_they_say():
     assert s3_params == one_params + stage_params
     with pytest.raises(ValueError, match="bottleneck_depth"):
         MinkUNetAttention(encoding_range=64, bottleneck_depth=0)
+
+
+def test_inject_enc2_adds_a_stride4_site_and_its_tokens_only_when_asked():
+    """Off, a stage3 backbone holds no `enc2` tokens, so its existing checkpoints load
+    strictly; on, `enc2` is an injection site with one token per role at its width."""
+    roles = ("masked", "candidate")
+    off = MinkUNetAttention(encoding_range=64, stage3=True, inject_roles=roles)
+    assert off.INJECT_TAPS == ("enc0", "enc1")
+    assert not any(k.startswith("tokens.enc2") for k in off.state_dict())
+    on = MinkUNetAttention(encoding_range=64, stage3=True, inject_roles=roles, inject_enc2=True)
+    assert on.INJECT_TAPS == ("enc0", "enc1", "enc2")
+    assert {k for k in on.state_dict() if k.startswith("tokens.enc2")} == {
+        "tokens.enc2__masked",
+        "tokens.enc2__candidate",
+    }
+    assert on.tokens["enc2__masked"].shape[0] == on.tap_dim("enc2")
+    # the tokens are built after the network, so every other parameter starts the same
+    torch.manual_seed(0)
+    a = MinkUNetAttention(encoding_range=64, stage3=True, inject_roles=roles).state_dict()
+    torch.manual_seed(0)
+    b = MinkUNetAttention(
+        encoding_range=64, stage3=True, inject_roles=roles, inject_enc2=True
+    ).state_dict()
+    assert all(torch.equal(a[k], b[k]) for k in a)
+    with pytest.raises(ValueError, match="needs stage3"):
+        MinkUNetAttention(encoding_range=64, inject_enc2=True)

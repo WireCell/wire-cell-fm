@@ -126,7 +126,8 @@ def run_one(store_root: Path, args) -> dict:
     # is not confounded by which pixels each side happened to see.
     try:
         pooled_feat = np.asarray(fx.event_means())
-        pooled_raw = np.asarray(fx.store.event_means(RAW_SOURCE, fx.tap))
+        # The raw baseline does not depend on the tap; extraction writes it under `out`.
+        pooled_raw = np.asarray(fx.store.event_means(RAW_SOURCE, "out"))
     except FileNotFoundError as exc:
         return {"event_knn": {"error": str(exc)}}
 

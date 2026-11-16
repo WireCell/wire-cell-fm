@@ -1,0 +1,63 @@
+# @package _global_
+#
+# The reference's MAE-only "frontier" recipe on the default training set: the U-Net at width
+# 128 (stem 64) with a third strided stage, 8 attention blocks at stride 8, charge L1 (weight 2)
+# at the masked pixels and focal occupancy (weight 0.3) on candidates grown from the bottleneck
+# (two upsampling stages, then 3 dilations at stride 2). Three independently region-wiped
+# copies of every event per step, 16x25-pixel cells, at most half the pixels wiped. The
+# `masked` token also enters the stride-4 skip.
+#
+# One rank at batch 32, so an epoch is 6,250 steps against the reference's 6,280 on its 200k
+# events. AdamW at 2e-4, 5 warmup epochs, cosine to 1e-6 over 50 epochs, weight decay 0.04 to
+# 0.1, 32-true. The reference's representation peaks near epoch 6 and degrades after, so the
+# checkpoints are dense early and the run is meant to be stopped after epoch 12.
+#
+#   env WCFM_PYENV=<venv> wcfm submit +experiment=mae_frontier
+
+defaults:
+  - override /model: mae
+  - _self_
+
+run:
+  name: wcfm_mae_frontier
+  save_every: 3
+  save_at: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+data:
+  global_batch_size: 32
+
+model:
+  backbone:
+    widths: [64, 64, 128, 128]
+    out_dim: 128
+    stage3: true
+    bottleneck_depth: 8
+    encoding_range: 160
+    encoding_dim: 16
+    attn_ch: 256
+    inject_enc2: true
+  augment:
+    copies: 3
+    masker:
+      cell_w: 16
+      cell_h: 25
+      wipe_max: 0.5
+      # the candidates are grown, not enumerated
+      build_candidates: false
+      neg_per_pos: null
+  terms:
+    charge:
+      weight: 2.0
+      inject_taps: [enc0, enc2]
+    occupancy:
+      weight: 0.3
+      candidates: grown
+      grow_iters: 3
+
+optim:
+  epochs: 50
+  lr: 2.0e-4
+  min_lr: 1.0e-6
+  weight_decay: 0.04
+  weight_decay_end: 0.1
+  warmup_epochs: 5

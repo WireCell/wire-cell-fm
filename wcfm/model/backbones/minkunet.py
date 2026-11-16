@@ -26,7 +26,9 @@ from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.functional.transforms import cat
 from warpconvnet.nn.modules.sparse_conv import SparseConv2d
 
-from .base import Backbone, FeatureBundle, Injection, InjectionGroup, inject_into_skip, upcast
+from wcfm.data.voxels import upcast
+
+from .base import Backbone, FeatureBundle, Injection, InjectionGroup, inject_into_skip
 from .blocks import (
     BottleneckSparseAttention2D,
     ConvBlock2D,
@@ -55,9 +57,9 @@ class MinkUNetAttention(Backbone):
     `bottleneck_depth` stacks that many bottleneck blocks. `stage3` adds a third strided stage
     (`conv3`, `block3`, at the bottleneck's width) before the bottleneck. A decoder then opens
     with `convtr4` and `block5`, which return to stride 4 on `enc2`'s rows and, under `unet`,
-    concatenate `enc2`. Tokens are never injected at `enc2`: the terms inject the `masked` role
-    at `enc0` and the `candidate` role at `enc1`, and the decoder reaches their rows through
-    those skips.
+    concatenate `enc2`. With `inject_enc2` (needs `stage3`) `enc2` is an injection site too, with
+    a token per role at its width; `block5` then emits the injected rows at stride 4. Off, the
+    backbone holds no `enc2` tokens, so a checkpoint saved without them loads strictly.
 
     `qk_norm` normalises q and k in every bottleneck attention (`SpatialFeatureAttention2D`).
 
@@ -124,6 +126,7 @@ class MinkUNetAttention(Backbone):
         bottleneck_depth: int = 1,
         stage3: bool = False,
         qk_norm: bool = False,
+        inject_enc2: bool = False,
     ):
         super().__init__()
         if decoder not in ("unet", "plain", "none"):
@@ -132,8 +135,12 @@ class MinkUNetAttention(Backbone):
             raise ValueError(f"inject_at must be 'skips' or 'input', got {inject_at!r}")
         if bottleneck_depth < 1:
             raise ValueError(f"bottleneck_depth must be at least 1, got {bottleneck_depth}")
+        if inject_enc2 and not stage3:
+            raise ValueError("inject_enc2 needs stage3: without it there is no enc2 skip")
         stem, e1, e2, dec = (int(w) for w in widths)
         self.stage3 = stage3
+        if inject_enc2:
+            self.INJECT_TAPS = type(self).INJECT_TAPS + ("enc2",)
         taps = type(self).TAPS
         if stage3:
             # Instance attributes: the class tables describe the two-stage network.
@@ -205,7 +212,7 @@ class MinkUNetAttention(Backbone):
         # One token per (skip, role), in that skip's width. Built after the network, as the
         # old tokens were, so every other parameter draws from the same point in the RNG
         # stream whether or not a run injects.
-        self._skip_width = {"enc0": stem, "enc1": e1}
+        self._skip_width = {"enc0": stem, "enc1": e1, "enc2": e2}
         # Every tap's width, so a term reading one can size its head. `dec_half` is block6's
         # output and is what the occupancy head reads: one question per 2x2 full-res block.
         self._tap_width = tap_width
@@ -250,6 +257,8 @@ class MinkUNetAttention(Backbone):
                 "convolution is numerically wrong. Set run.precision=32-true."
             )
         at_input = self.inject_at == "input"
+        if at_input and inject and inject.at("enc2"):
+            raise ValueError("tokens enter enc2 only as a skip; set inject_at='skips'")
         if inject and not at_input and self.decoder != "unet":
             raise ValueError(
                 f"decoder={self.decoder!r} reads no skip, so tokens injected there would reach "
@@ -258,6 +267,7 @@ class MinkUNetAttention(Backbone):
 
         inj0: list[InjectionGroup] = []
         inj1: list[InjectionGroup] = []
+        inj2: list[InjectionGroup] = []
         enc0 = self.conv0(xs)
         if at_input:
             enc0, inj0 = self._skip(enc0, "enc0", inject)
@@ -284,14 +294,15 @@ class MinkUNetAttention(Backbone):
         else:
             # A token at a skip changes both what the decoder reads and where it emits: the
             # transposed convolution takes its output geometry from the skip.
-            skip1, skip0 = enc1, enc0
+            skip2, skip1, skip0 = enc2, enc1, enc0
             if not at_input:
+                skip2, inj2 = self._skip(enc2, "enc2", inject)
                 skip1, inj1 = self._skip(enc1, "enc1", inject)
                 skip0, inj0 = self._skip(enc0, "enc0", inject)
             dec_quarter = bott_attn
             if self.stage3:
-                up2 = self.convtr4(bott_attn, enc2)
-                dec_quarter = self.block5(cat(up2, enc2) if self.decoder == "unet" else up2)
+                up2 = self.convtr4(bott_attn, skip2)
+                dec_quarter = self.block5(cat(up2, skip2) if self.decoder == "unet" else up2)
             up1 = self.convtr5(dec_quarter, skip1)
             dec_half = self.block6(cat(up1, skip1) if self.decoder == "unet" else up1)
             up0 = self.convtr7(dec_half, skip0)
@@ -302,5 +313,5 @@ class MinkUNetAttention(Backbone):
         return FeatureBundle(
             out=out,
             taps={t: values[t] for t in taps},
-            injected=Injection(inj1 + inj0) if inject is not None else None,
+            injected=Injection(inj2 + inj1 + inj0) if inject is not None else None,
         )

@@ -546,6 +546,40 @@ def test_a_strided_tap_writes_its_own_coordinates(tmp_path):
     assert store.coords("half").shape[1] == 2
 
 
+def test_upcast_writes_a_strided_tap_on_the_pixel_rows_and_concat_reads_both(tmp_path):
+    """Under `upcast` the stride-2 tap is written at stride 1, one row per pixel, every pixel
+    of a 2x2 block carrying the same parent features; `tap="out+half"` then stacks it beside
+    `out` for the probes."""
+    from wcfm.eval.probes.features import load_features
+
+    ckpt, real = _with_half(tmp_path)
+    import wcfm.eval.extract as ex
+
+    try:
+        res = extract(
+            ckpt, store_root=tmp_path / "f", eval_set_root=tmp_path / "e",
+            loader=batches(2), sources=("student",), taps=("half",), upcast=True,
+        )
+    finally:
+        ex.load_module = real
+
+    store = FeatureStore(tmp_path / "f")
+    prov = store.provenance()
+    assert prov.tap_strides == {OUT_TAP: 1, "half": 1} and prov.extra["upcast"] is True
+    half = np.asarray(store.features("student", "half"), dtype=np.float32)
+    assert half.shape[0] == res.n_pixels
+    fx = load_features(tmp_path / "f", tap="out+half", eval_set_root=tmp_path / "e")
+    out = np.asarray(store.features("student", OUT_TAP), dtype=np.float32)
+    assert fx.feat.shape == (res.n_pixels, out.shape[1] + half.shape[1])
+    rows = np.arange(0, res.n_pixels, 3)
+    np.testing.assert_array_equal(fx.feat[rows], np.concatenate([out[rows], half[rows]], 1))
+    parent = np.concatenate(
+        [fx.positions // 2, np.repeat(np.arange(fx.n_events), np.diff(fx.offsets))[:, None]], 1
+    )
+    _, first, inv = np.unique(parent, axis=0, return_index=True, return_inverse=True)
+    np.testing.assert_array_equal(half, half[first[inv.reshape(-1)]])
+
+
 def test_a_strided_tap_that_prunes_voxels_is_refused(tmp_path):
     """The control for the strided branch of the invariant. A tap whose rows are not the
     strided input has no reconstructable coordinates, and nothing else would notice."""

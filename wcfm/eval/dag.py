@@ -101,6 +101,9 @@ class DagPlan:
     max_images: int
     device: str = "cuda"
     retry: int = 2
+    #: Taps the probes score, comma-separated; `out` writes to `probes/`, any other tap to
+    #: `probes/<tap>/`, so one stage's JSONs for two taps never share a name.
+    probe_taps: str = "out"
     #: Extract nodes running at once; 0 is unthrottled. Written as a DAG category, so the
     #: probe nodes stay unthrottled: a DAG-wide `condor_submit_dag -maxjobs` would queue each
     #: epoch's probes behind the remaining extracts.
@@ -251,6 +254,7 @@ def build_dag(plan: DagPlan) -> dict[Path, str]:
                     str(plan.run_dir / "probes"),
                     plan.stages,
                     str(plan.eval_set_root),
+                    plan.probe_taps,
                 ]
             ),
             log_dir=log_dir,

@@ -58,6 +58,7 @@ from typing import Any
 import numpy as np
 
 from wcfm.data import truth as tiers
+from wcfm.data.voxels import upcast as upcast_to
 from wcfm.data.voxels import voxels_from
 
 from .format import EvalSet, FeatureBlock, FeatureStore, Provenance, event_key_hash
@@ -131,6 +132,7 @@ def extract(
     eval_set_id: str = "",
     sources: Sequence[str] = ("student", "teacher"),
     taps: Sequence[str] = (),
+    upcast: bool = False,
     max_images: int = -1,
     rows: str = "all",
     pool_per_class: int = DEFAULT_POOL_PER_CLASS,
@@ -153,6 +155,9 @@ def extract(
     `sources` is what the caller wants. A branch the run does not have is dropped rather than
     raising, so `--sources=student,teacher` is a sensible default across a sweep in which some
     runs trained without a teacher. Asking for no available branch at all does raise.
+
+    `upcast` writes every strided tap on the pixel rows, each pixel taking its parent's
+    features, so the probes can score it; without it a strided tap keeps its own coordinates.
 
     `loader` is iterated twice when `eval_set_root` holds no set yet. Against an existing set it
     must reach every event the set holds; its order and batch size are free.
@@ -223,6 +228,7 @@ def extract(
         store,
         sources=use,
         taps=taps,
+        upcast=upcast,
         rows=rows,
         event_keys=np.load(eval_set_root / "event_keys.npy"),
         offsets=offsets,
@@ -306,6 +312,7 @@ def extract(
             "n_rows": int(len(row_index)),
             "device": str(device),
             "cap_bound": bool(cap_bound),
+            "upcast": bool(upcast),
             "module": _provenance_of(module),
         },
     )
@@ -445,6 +452,7 @@ class _FeaturePass:
         *,
         sources: Sequence[str],
         taps: Sequence[str],
+        upcast: bool = False,
         rows: str,
         event_keys: np.ndarray,
         offsets: np.ndarray,
@@ -455,6 +463,7 @@ class _FeaturePass:
         self.store = store
         self.sources = list(sources)
         self.taps = tuple(taps)
+        self.upcast = bool(upcast)
         self.rows = rows
         self.index = {str(k): i for i, k in enumerate(event_keys)}
         self.seen = np.zeros(len(event_keys), dtype=bool)
@@ -472,7 +481,8 @@ class _FeaturePass:
         self.blocks: dict[tuple[str, str], FeatureBlock] = {}
         self.event_means: dict[tuple[str, str], np.ndarray] = {}
         self.strided: dict[tuple[str, str], dict[int, np.ndarray]] = {}
-        self.tap_strides: dict[str, int] = {}
+        self.tap_strides: dict[str, int] = {}  # as written: 1 for an upcast tap
+        self._native_strides: dict[str, int] = {}
         self._tap_coords: dict[str, dict[int, np.ndarray]] = {}
         self.n_events = 0
         self.n_pixels = 0
@@ -537,7 +547,12 @@ class _FeaturePass:
                 if stride > 1 and stride not in expected:
                     expected[stride] = _strided_counts(xs, stride)
                 _check_alignment(source, tap, vox, xs, stride, expected.get(stride))
-                feats = vox.feature_tensor.detach().float().cpu().numpy()
+                if self.upcast and stride > 1:
+                    feats = upcast_to(vox, bundle.out, stride).detach().float().cpu().numpy()
+                    stride = 1
+                else:
+                    feats = vox.feature_tensor.detach().float().cpu().numpy()
+                self.tap_strides[tap] = stride
                 if stride == 1:
                     feats = feats.astype(np.float16)
                     self._write(source, tap, feats, placed)
@@ -575,11 +590,10 @@ class _FeaturePass:
             self.blocks[key].write(start, feats[src])
 
     def _stride(self, tap: str) -> int:
-        if tap in self.tap_strides:
-            return self.tap_strides[tap]
-        stride = 1 if tap == OUT_TAP else int(_tap_stride(self.module, tap))
-        self.tap_strides[tap] = stride
-        return stride
+        if tap not in self._native_strides:
+            stride = 1 if tap == OUT_TAP else int(_tap_stride(self.module, tap))
+            self._native_strides[tap] = stride
+        return self._native_strides[tap]
 
     @property
     def tap_coords(self) -> dict[str, np.ndarray]:

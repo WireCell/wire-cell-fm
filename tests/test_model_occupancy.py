@@ -284,3 +284,92 @@ def test_a_step_of_mae_runs_and_both_terms_reach_the_loss():
     assert plan.views, "the region masker produced no view"
     view = plan.views[0]
     assert view.mask is not None and view.mask.cand_coords is not None
+
+
+# ------------------------------------------------------------------- grown candidates
+
+from wcfm.data.voxels import voxels_from  # noqa: E402
+from wcfm.model.terms.occupancy import grow_candidates, occupied_at  # noqa: E402
+
+from .fake_backbone import as_pairs  # noqa: E402
+
+
+def _vox(*images, stride=None):
+    coords = [torch.as_tensor(c, dtype=torch.int32).reshape(-1, 2) for c in images]
+    counts = [c.shape[0] for c in coords]
+    offsets = torch.tensor([0, *torch.tensor(counts).cumsum(0).tolist()], dtype=torch.int64)
+    v = voxels_from(torch.cat(coords), torch.ones(sum(counts), 1), offsets)
+    return v
+
+
+def _box(x0, x1, y0, y1):
+    return {(x, y) for x in range(x0, x1 + 1) for y in range(y0, y1 + 1)}
+
+
+def test_growth_from_a_stride8_bottleneck_doubles_twice_then_dilates():
+    """One visible pixel: bottleneck cell (2, 1). x2 and 3x3 gives x 3..5, y 1..3; x2 again
+    and 3x3 gives x 5..11, y 1..7 at stride 2. Each further iteration dilates by one."""
+    vox = _vox([[17, 9]])
+    one = grow_candidates(vox, 8, 2, iters=1)[0]
+    assert as_pairs(one) == _box(5, 11, 1, 7)
+    three = grow_candidates(vox, 8, 2, iters=3)[0]
+    assert as_pairs(three) == _box(3, 13, 0, 9)  # clamped at 0, not above
+
+
+def test_growth_is_per_image_and_an_empty_image_grows_nothing():
+    grown = grow_candidates(_vox([[17, 9]], [], [[0, 0]]), 4, 2, iters=1)
+    assert [g.shape[0] > 0 for g in grown] == [True, False, True]
+    assert as_pairs(grown[2]) == _box(0, 1, 0, 1)
+
+
+def test_a_row_is_occupied_when_its_block_holds_any_clean_pixel():
+    rows = _vox([[0, 0], [1, 0], [5, 5]], [[0, 0]])
+    clean = _vox([[1, 1], [11, 11]], [[3, 3]])
+    assert occupied_at(rows, clean, 2).tolist() == [True, False, True, False]
+
+
+class BottleneckBackbone(LinearBackbone):
+    TAP_STRIDE = {"enc0": 1, "hidden": 1, "bottleneck_attn": 4}
+
+
+def test_grown_mode_refuses_a_masker_that_also_enumerates():
+    with pytest.raises(ValueError, match="build_candidates: false"):
+        _module(
+            FlatOccupancyTerm(candidates="grown"),
+            bb=BottleneckBackbone(inject_roles=("masked", "candidate")),
+        )
+
+
+def test_an_unknown_candidate_source_is_refused():
+    with pytest.raises(ValueError, match="'masker' or 'grown'"):
+        OccupancyTerm(candidates="dense")
+
+
+# ------------------------------------------------------------------ copies and charge sites
+
+
+def test_copies_are_independently_masked_whole_images():
+    torch.manual_seed(0)
+    aug = Augment(masker=region_masker(image_w=64, image_h=48, cell_w=8, cell_h=8,
+                                       build_candidates=False), copies=3)
+    plan = aug(make_batch(width=64, height=48))
+    assert plan.n_views == plan.n_global == 3
+    masks = [as_pairs(v.mask.masked_coords[0]) for v in plan.views]
+    assert len({frozenset(m) for m in masks}) > 1
+    assert all(torch.equal(v.clean.coordinate_tensor, plan.source.voxels.coordinate_tensor)
+               for v in plan.views)
+
+
+def test_copies_need_a_masker_and_no_cropper():
+    with pytest.raises(ValueError, match="no cropper"):
+        Augment(copies=2)
+
+
+def test_charge_refuses_an_injection_site_the_backbone_lacks():
+    with pytest.raises(ValueError, match="injects at"):
+        SslModule(
+            backbone=backbone(),
+            terms={"charge": ChargeTerm(inject_taps=("enc2",))},
+            augment=Augment(masker=region_masker()),
+            teacher=NoTeacher(),
+        )
