@@ -309,6 +309,11 @@ class SslModuleConfig:
     normalize: Any = None
     # Backbone taps to request on every forward and publish as observables.
     observe_taps: list[str] = field(default_factory=list)
+    # A `wcfm` checkpoint whose student backbone, injection tokens aside, initialises this one
+    # (`_warm_start` in `wcfm/model/modules/ssl.py`). Read whenever the module is built, so
+    # extracting from this run later needs the file too, as `distill.checkpoint` does. A
+    # resumed run loads it and then overwrites it with its own checkpoint.
+    init_from: str | None = None
 
 
 @dataclass

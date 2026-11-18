@@ -86,6 +86,32 @@ def _inference_context(module, step: int, device) -> StepContext:
     )
 
 
+def _warm_start(backbone: nn.Module, path: str) -> None:
+    """Load the student backbone of the `wcfm` checkpoint at `path` into `backbone`.
+
+    Injection tokens are skipped: which roles exist, and at which skips, belongs to the
+    objective that wrote the file, so they keep this run's initialisation. Every other backbone
+    tensor must be in the file with this backbone's shape, or this raises. Settings that are not
+    tensors -- `encoding_range`, `encoding_dim` -- load silently whatever they were, and a
+    mismatch changes what the loaded attention computes: keep them equal to the source run's.
+    """
+    from wcfm.engine.checkpoint import load_checkpoint
+
+    model = load_checkpoint(path).model
+    weights = {
+        k.removeprefix("backbone."): v
+        for k, v in model.items()
+        if k.startswith("backbone.") and not k.startswith("backbone.tokens.")
+    }
+    missing, unexpected = backbone.load_state_dict(weights, strict=False)
+    missing = [k for k in missing if not k.startswith("tokens.")]
+    if missing or unexpected:
+        raise ValueError(
+            f"init_from {path} does not hold this backbone: missing {missing}, "
+            f"unexpected {unexpected}"
+        )
+
+
 def _ema(student: nn.Module, teacher: nn.Module, momentum: float) -> None:
     with torch.no_grad():
         for s, t in zip(student.parameters(), teacher.parameters(), strict=True):
@@ -124,11 +150,16 @@ class SslModule(nn.Module):
         teacher: EmaTeacher | NoTeacher | None = None,
         normalize: FeatureLogTransform | None = None,
         observe_taps: Iterable[str] = (),
+        init_from: str | None = None,
     ):
         super().__init__()
         if not terms:
             raise ValueError("a model needs at least one term; `model.terms` is empty")
         self.backbone = backbone
+        self.init_from = init_from
+        if init_from is not None:
+            # Before the EMA twin is copied, so a teacher starts from the same weights.
+            _warm_start(backbone, init_from)
         self.augment = augment
         self.normalize = normalize
         self.observe_taps = tuple(observe_taps)
@@ -574,6 +605,7 @@ class SslModule(nn.Module):
             "teacher": repr(self.teacher_cfg) if self.teacher_cfg else None,
             "augment": repr(self.augment),
             "normalize": repr(self.normalize) if self.normalize else None,
+            "init_from": self.init_from,
         }
 
     def train(self, mode: bool = True):
