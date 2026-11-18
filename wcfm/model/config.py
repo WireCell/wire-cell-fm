@@ -66,6 +66,10 @@ class MinkUNetConfig:
     qk_norm: bool = False
     # An injection site at `enc2` (stride 4), with a token per role; needs `stage3`.
     inject_enc2: bool = False
+    # The bottleneck as a pre-norm transformer stack with one projection on each side, so the
+    # encoder's gradient does not pass through two projections per block. Off rebuilds the
+    # stream-norm blocks every existing checkpoint holds.
+    bottleneck_prenorm: bool = False
 
 
 @dataclass

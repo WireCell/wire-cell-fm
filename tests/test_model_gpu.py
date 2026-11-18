@@ -197,6 +197,28 @@ def test_qk_norm_flash_and_dense_paths_agree(device):
     torch.testing.assert_close(a.feature_tensor, b.feature_tensor, rtol=2e-2, atol=2e-2)
 
 
+def test_a_prenorm_bottleneck_with_silent_blocks_is_its_two_projections(device):
+    """The identity path: with every block's attention and MLP output zeroed, a depth-8 stack
+    is `out_proj(norm(in_proj(x)))`, and the encoder below it still receives a gradient."""
+    torch.manual_seed(0)
+    m = MinkUNetAttention(
+        encoding_range=64, stage3=True, bottleneck_depth=8, bottleneck_prenorm=True
+    ).to(device)
+    b = m.bottleneck
+    with torch.no_grad():
+        for blk in b.blocks:
+            for lin in (blk.attn.proj, blk.mlp[2]):
+                lin.weight.zero_()
+                lin.bias.zero_()
+    xs, _ = scene(device)
+    with torch.no_grad():
+        taps = m.eval()(xs, None, ("bottleneck", "bottleneck_attn")).taps
+        direct = b.out_proj(b.norm(b.in_proj(taps["bottleneck"])))
+    torch.testing.assert_close(direct.feature_tensor, taps["bottleneck_attn"].feature_tensor)
+    m.train()(xs).out.feature_tensor.square().sum().backward()
+    assert m.conv3[0].weight.grad.abs().sum() > 0
+
+
 def test_the_plain_decoder_emits_on_the_input_rows(device):
     m = MinkUNetAttention(encoding_range=64, decoder="plain").to(device).eval()
     xs, removed = scene(device)

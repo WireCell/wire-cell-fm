@@ -33,6 +33,7 @@ from .blocks import (
     BottleneckSparseAttention2D,
     ConvBlock2D,
     ConvTrBlock2D,
+    PreNormBottleneck,
     ResidualSparseBlock2D,
 )
 
@@ -62,6 +63,9 @@ class MinkUNetAttention(Backbone):
     backbone holds no `enc2` tokens, so a checkpoint saved without them loads strictly.
 
     `qk_norm` normalises q and k in every bottleneck attention (`SpatialFeatureAttention2D`).
+    `bottleneck_prenorm` builds the bottleneck as a `PreNormBottleneck` (keys `bottleneck.in_proj`,
+    `bottleneck.blocks.<i>`, `bottleneck.norm`, `bottleneck.out_proj`, at every depth) in place
+    of stream-norm blocks; it needs `attention`.
 
     `decoder` picks what follows the bottleneck. `unet` concatenates each skip into the
     decoder. `plain` runs the same decoder on its own input, taking only its output coordinates
@@ -127,6 +131,7 @@ class MinkUNetAttention(Backbone):
         stage3: bool = False,
         qk_norm: bool = False,
         inject_enc2: bool = False,
+        bottleneck_prenorm: bool = False,
     ):
         super().__init__()
         if decoder not in ("unet", "plain", "none"):
@@ -135,6 +140,8 @@ class MinkUNetAttention(Backbone):
             raise ValueError(f"inject_at must be 'skips' or 'input', got {inject_at!r}")
         if bottleneck_depth < 1:
             raise ValueError(f"bottleneck_depth must be at least 1, got {bottleneck_depth}")
+        if bottleneck_prenorm and not attention:
+            raise ValueError("bottleneck_prenorm needs attention: it is a transformer stack")
         if inject_enc2 and not stage3:
             raise ValueError("inject_enc2 needs stage3: without it there is no enc2 skip")
         stem, e1, e2, dec = (int(w) for w in widths)
@@ -173,23 +180,27 @@ class MinkUNetAttention(Backbone):
             self.conv3 = ConvBlock2D(e2, e2, kernel_size=2, stride=2)
             self.block3 = ResidualSparseBlock2D(e2, e2, kernel_size=3)
 
+        block_kw = dict(
+            heads=heads,
+            encoding=spatial_encoding,
+            flash=flash_attention,
+            encoding_range=encoding_range,
+            encoding_channels=encoding_dim,
+            qk_norm=qk_norm,
+        )
+
         def bottleneck_block() -> nn.Module:
             if not attention:
                 return ResidualSparseBlock2D(e2, e2, kernel_size=3)
-            return BottleneckSparseAttention2D(
-                channels=e2,
-                attn_channels=attn_ch,
-                heads=heads,
-                encoding=spatial_encoding,
-                flash=flash_attention,
-                encoding_range=encoding_range,
-                encoding_channels=encoding_dim,
-                qk_norm=qk_norm,
-            )
+            return BottleneckSparseAttention2D(channels=e2, attn_channels=attn_ch, **block_kw)
 
-        blocks = [bottleneck_block() for _ in range(bottleneck_depth)]
-        # A single block stays unwrapped so depth-1 checkpoints keep their `bottleneck.*` keys.
-        self.bottleneck: nn.Module = blocks[0] if bottleneck_depth == 1 else nn.Sequential(*blocks)
+        self.bottleneck: nn.Module
+        if bottleneck_prenorm:
+            self.bottleneck = PreNormBottleneck(e2, attn_ch, bottleneck_depth, **block_kw)
+        else:
+            blocks = [bottleneck_block() for _ in range(bottleneck_depth)]
+            # A single block stays unwrapped so depth-1 checkpoints keep their `bottleneck.*` keys.
+            self.bottleneck = blocks[0] if bottleneck_depth == 1 else nn.Sequential(*blocks)
         # Built in forward order: initial weights depend on it through the RNG stream.
         tap_width = {"enc0": stem, "enc1": e1, "bottleneck": e2, "bottleneck_attn": e2}
         if stage3:
