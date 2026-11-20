@@ -74,9 +74,12 @@ from one of these, not from a `model=` preset alone:
 
 - `mae_grown`, charge plus occupancy asked of candidates grown from the bottleneck
   (`model.terms.occupancy.candidates: grown`): `mae_frontier` (the U-Net at width 128 with
-  `stage3` and 8 bottleneck blocks, charge at the masked pixels with the `masked` token also at
-  `enc2`; three region-wiped copies per step, 1 rank x 32, 32-true). It peaks near epoch 6 and
-  degrades after: stop it after epoch 12. Score it at `out`, at `dec_half` and at both
+  `stage3` and a pre-norm bottleneck of 8 blocks, charge at the masked pixels with the `masked`
+  token also at `enc2`; three region-wiped copies per step, 1 rank x 32, lr 6e-5, 32-true).
+  Both the pre-norm bottleneck and the lr are needed: with stream-norm blocks the gradient
+  reaching `enc3` is exactly zero from step ~20k, and at the reference's lr 2e-4 every stage's
+  gradient grows from step ~50k and the representation degrades after epoch 9. Score it at
+  `out`, at `dec_half` and at both
   (`wcfm eval submit ... --taps=dec_half --upcast --probe-taps=out,dec_half,out+dec_half`).
 
 `mae` (charge plus occupancy over the masker's enumerated candidates) stays `config.yaml`'s
@@ -84,7 +87,7 @@ default and is not nominal.
 
 A preset's `run.name` is the run it produces, and the file name need not match it:
 `polarmae_short` writes `wcfm_polarmae_200k_b80k`, `polarmae_long` writes
-`wcfm_polarmae_200k_10M_lr35`.
+`wcfm_polarmae_200k_10M_lr35`, `mae_frontier` writes `wcfm_mae_frontier_prenorm_lr60`.
 Compose a preset against its run's `config.yaml` before editing it; only `data.cache_dir`,
 `run.output_root` and, for the two PoLAr-MAE runs, the unread `run.save_every_minutes` differ.
 `hybrid_ddp6_eb600` has no run of its own yet.

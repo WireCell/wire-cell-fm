@@ -1,0 +1,26 @@
+# @package _global_
+#
+# `polarmae_long` with the batch-global norm (`model.backbone.norm: global`, one mean and one
+# standard deviation over every real token of the per-rank batch, as the PoLAr-MAE reference
+# trains) in place of the per-token layer norm. Nothing else changes, so its checkpoints compare
+# one to one with `wcfm_polarmae_200k_10M_lr35`: watch the per-head q.k norm of
+# `backbone.decoder.blocks.0`, which runs away in that run from step ~60,000.
+#
+# With `global` a token's features depend on the other events in its batch, and so does
+# extraction: score it at the eval set's batch, `wcfm eval submit ... --batch-size=8`.
+#
+#   env WCFM_PYENV=<venv> WCFM_REQUEST_MEMORY=48000 WCFM_REQUEST_CPUS=20 \
+#     wcfm submit +experiment=polarmae_long_globalnorm
+#
+# Everything not set below comes from polarmae_long.
+
+defaults:
+  - polarmae_long
+  - _self_
+
+run:
+  name: wcfm_polarmae_200k_10M_lr35_gnorm
+
+model:
+  backbone:
+    norm: global

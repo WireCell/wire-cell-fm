@@ -8,9 +8,13 @@
 # `masked` token also enters the stride-4 skip.
 #
 # One rank at batch 32, so an epoch is 6,250 steps against the reference's 6,280 on its 200k
-# events. AdamW at 2e-4, 5 warmup epochs, cosine to 1e-6 over 50 epochs, weight decay 0.04 to
-# 0.1, 32-true. The reference's representation peaks near epoch 6 and degrades after, so the
-# checkpoints are dense early and the run is meant to be stopped after epoch 12.
+# events. AdamW, 5 warmup epochs, cosine to 1e-6 over 50 epochs, weight decay 0.04 to 0.1,
+# 32-true. Checkpoints are dense to epoch 9, then every 3 epochs.
+#
+# Two settings depart from the reference, and both are needed. The bottleneck is pre-norm:
+# with the reference's stream-norm blocks the gradient reaching `enc3` is exactly zero from
+# step ~20k. The peak lr is 6e-5: at the reference's 2e-4 every stage's gradient norm grows
+# from step ~50k and the loss rises from epoch 10, with either bottleneck.
 #
 #   env WCFM_PYENV=<venv> wcfm submit +experiment=mae_frontier
 
@@ -19,7 +23,7 @@ defaults:
   - _self_
 
 run:
-  name: wcfm_mae_frontier
+  name: wcfm_mae_frontier_prenorm_lr60
   save_every: 3
   save_at: [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
@@ -36,6 +40,7 @@ model:
     encoding_dim: 16
     attn_ch: 256
     inject_enc2: true
+    bottleneck_prenorm: true
   augment:
     copies: 3
     masker:
@@ -56,7 +61,7 @@ model:
 
 optim:
   epochs: 50
-  lr: 2.0e-4
+  lr: 6.0e-5
   min_lr: 1.0e-6
   weight_decay: 0.04
   weight_decay_end: 0.1
