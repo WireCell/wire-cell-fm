@@ -341,7 +341,8 @@ class RegionMasker(Masker):
     target upstream.
 
     The grid is defined on the canvas rather than on the data, which is why it takes `image_w`
-    and `image_h` and why it cannot run on a crop.
+    and `image_h` and why it cannot run on a crop. Cells need not tile the canvas: the last
+    column and row are partial. With `build_candidates` they must tile, and be even.
     """
 
     requires_full_canvas: ClassVar[bool] = True
@@ -365,13 +366,14 @@ class RegionMasker(Masker):
             raise ValueError(f"unknown flavor {flavor!r}; expected 'wipe' or 'randomize'")
         # A partial edge cell densifies to a different candidate count than an interior one
         # and silently skews the positive rate.
-        if image_w % cell_w or image_h % cell_h:
+        if build_candidates and (image_w % cell_w or image_h % cell_h):
             raise ValueError(
-                f"cell {cell_w}x{cell_h} does not tile a {image_w}x{image_h} canvas evenly"
+                f"cell {cell_w}x{cell_h} does not tile a {image_w}x{image_h} canvas evenly, "
+                "which build_candidates needs"
             )
         # An odd cell puts a wiped cell's coarse footprint half a cell out of step with the
         # grid, so a candidate can land on a coarse cell that still holds surviving charge.
-        if cell_w % cand_stride or cell_h % cand_stride:
+        if build_candidates and (cell_w % cand_stride or cell_h % cand_stride):
             raise ValueError(
                 f"cell {cell_w}x{cell_h} must divide by the candidate stride {cand_stride}"
             )
@@ -384,8 +386,10 @@ class RegionMasker(Masker):
         self.cand_stride = int(cand_stride)
         self.neg_per_pos = neg_per_pos
         self.max_neg = max_neg
-        self.n_cols = self.image_w // self.cell_w
-        self.n_rows = self.image_h // self.cell_h
+        # Ceil: with floor, a pixel in a partial last column would index the next row's first
+        # cell.
+        self.n_cols = -(-self.image_w // self.cell_w)
+        self.n_rows = -(-self.image_h // self.cell_h)
         self.n_cells = self.n_cols * self.n_rows
 
     def _densify(self, take_cell: Tensor, ucells: Tensor, device, coord_dtype):

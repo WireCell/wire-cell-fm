@@ -104,19 +104,33 @@ def _compose_index(outer: list[Tensor], inner: list[Tensor]) -> list[Tensor]:
 
 
 class Augment:
-    """Crops, then a mask per student view. Either half may be `None`."""
+    """Crops, then a mask per student view. Either half may be `None`.
 
-    def __init__(self, cropper: Cropper | None = None, masker: Masker | None = None):
+    Without a cropper the views are `copies` of the whole image, each masked independently;
+    every copy is a global view. A cropper sets its own views, so `copies` must stay 1.
+    """
+
+    def __init__(
+        self, cropper: Cropper | None = None, masker: Masker | None = None, copies: int = 1
+    ):
+        if copies < 1:
+            raise ValueError(f"copies must be at least 1, got {copies}")
+        if copies > 1 and (cropper is not None or masker is None):
+            raise ValueError(
+                "copies > 1 repeats the whole image under independent masks; it needs a masker "
+                "and no cropper, which sets its own views"
+            )
         self.cropper = cropper
         self.masker = masker
+        self.copies = int(copies)
 
     @property
     def n_global(self) -> int:
-        return self.cropper.n_global if self.cropper is not None else 1
+        return self.cropper.n_global if self.cropper is not None else self.copies
 
     @property
     def n_views(self) -> int:
-        return self.cropper.n_crops if self.cropper is not None else 1
+        return self.cropper.n_crops if self.cropper is not None else self.copies
 
     def __call__(self, batch: Batch) -> ViewPlan:
         voxels, meta = batch.voxels, batch.meta
@@ -124,7 +138,7 @@ class Augment:
             crops = self.cropper(voxels)
             pieces = [(c.voxels, c.index, c.is_global) for c in crops]
         else:
-            pieces = [(voxels, None, True)]
+            pieces = [(voxels, None, True)] * self.copies
 
         views: list[View] = []
         for clean, index, is_global in pieces:
@@ -148,7 +162,7 @@ class Augment:
         return ViewPlan(views=views, source=batch, n_global=self.n_global)
 
     def __repr__(self) -> str:
-        return f"Augment(cropper={self.cropper!r}, masker={self.masker!r})"
+        return f"Augment(cropper={self.cropper!r}, masker={self.masker!r}, copies={self.copies})"
 
 
 __all__ = ["Augment", "View", "ViewPlan", "select_meta"]

@@ -43,7 +43,7 @@ from wcfm.data.voxels import Batch
 from wcfm.engine.protocol import StepContext, StepOutput
 
 from ..augment.transforms import FeatureLogTransform
-from ..augment.views import Augment
+from ..augment.views import Augment, ViewPlan
 from ..backbones.base import Backbone, FeatureBundle, Injection
 from ..terms.base import TeacherOutput, Term
 
@@ -86,6 +86,32 @@ def _inference_context(module, step: int, device) -> StepContext:
     )
 
 
+def _warm_start(backbone: nn.Module, path: str) -> None:
+    """Load the student backbone of the `wcfm` checkpoint at `path` into `backbone`.
+
+    Injection tokens are skipped: which roles exist, and at which skips, belongs to the
+    objective that wrote the file, so they keep this run's initialisation. Every other backbone
+    tensor must be in the file with this backbone's shape, or this raises. Settings that are not
+    tensors -- `encoding_range`, `encoding_dim` -- load silently whatever they were, and a
+    mismatch changes what the loaded attention computes: keep them equal to the source run's.
+    """
+    from wcfm.engine.checkpoint import load_checkpoint
+
+    model = load_checkpoint(path).model
+    weights = {
+        k.removeprefix("backbone."): v
+        for k, v in model.items()
+        if k.startswith("backbone.") and not k.startswith("backbone.tokens.")
+    }
+    missing, unexpected = backbone.load_state_dict(weights, strict=False)
+    missing = [k for k in missing if not k.startswith("tokens.")]
+    if missing or unexpected:
+        raise ValueError(
+            f"init_from {path} does not hold this backbone: missing {missing}, "
+            f"unexpected {unexpected}"
+        )
+
+
 def _ema(student: nn.Module, teacher: nn.Module, momentum: float) -> None:
     with torch.no_grad():
         for s, t in zip(student.parameters(), teacher.parameters(), strict=True):
@@ -124,11 +150,16 @@ class SslModule(nn.Module):
         teacher: EmaTeacher | NoTeacher | None = None,
         normalize: FeatureLogTransform | None = None,
         observe_taps: Iterable[str] = (),
+        init_from: str | None = None,
     ):
         super().__init__()
         if not terms:
             raise ValueError("a model needs at least one term; `model.terms` is empty")
         self.backbone = backbone
+        self.init_from = init_from
+        if init_from is not None:
+            # Before the EMA twin is copied, so a teacher starts from the same weights.
+            _warm_start(backbone, init_from)
         self.augment = augment
         self.normalize = normalize
         self.observe_taps = tuple(observe_taps)
@@ -224,7 +255,8 @@ class SslModule(nn.Module):
         """
         for name, term in self.terms.items():
             stride = getattr(term, "READ_STRIDE", None)
-            if stride is None or masker is None:
+            # Grown candidates are labelled from the unmasked image, not from the removed set.
+            if stride is None or masker is None or getattr(term, "grown", False):
                 continue
             for axis in ("cell_w", "cell_h"):
                 cell = getattr(masker, axis, None)
@@ -310,10 +342,10 @@ class SslModule(nn.Module):
         if self.teacher_backbone is not None:
             needs = [n for n, t in self.terms.items() if t.requires_teacher]
             with torch.no_grad():
-                teacher = [
-                    ctx.module(v.clean, None, self.required_taps, teacher=True, terms=needs)
-                    for v in plan.globals
-                ]
+                taps = self.required_taps
+                teacher = _per_clean_view(
+                    plan, lambda c: ctx.module(c, None, taps, teacher=True, terms=needs)
+                )
             self._last_teacher = teacher[0][0]
         for term in self.terms.values():
             term.begin_step(plan, teacher)
@@ -444,10 +476,9 @@ class SslModule(nn.Module):
         if self.teacher_backbone is not None:
             needs = [n for n, t in self.terms.items() if t.requires_teacher]
             with torch.no_grad():
-                teacher = [
-                    self(v.clean, None, self.required_taps, teacher=True, terms=needs)
-                    for v in plan.globals
-                ]
+                teacher = _per_clean_view(
+                    plan, lambda c: self(c, None, self.required_taps, teacher=True, terms=needs)
+                )
         for term in self.terms.values():
             term.begin_step(plan, teacher)
 
@@ -574,6 +605,7 @@ class SslModule(nn.Module):
             "teacher": repr(self.teacher_cfg) if self.teacher_cfg else None,
             "augment": repr(self.augment),
             "normalize": repr(self.normalize) if self.normalize else None,
+            "init_from": self.init_from,
         }
 
     def train(self, mode: bool = True):
@@ -597,3 +629,13 @@ class SslModule(nn.Module):
             epochs=1,
             steps_per_epoch=total,
         )
+
+
+def _per_clean_view(plan: ViewPlan, encode) -> list:
+    """`encode(view.clean)` for every global view, run once per distinct clean image: the
+    `copies` of `Augment` share one, and their teacher outputs are identical."""
+    done: dict[int, Any] = {}
+    for v in plan.globals:
+        if id(v.clean) not in done:
+            done[id(v.clean)] = encode(v.clean)
+    return [done[id(v.clean)] for v in plan.globals]

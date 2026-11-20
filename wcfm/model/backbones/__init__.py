@@ -8,7 +8,6 @@ from .base import (
     InjectionGroup,
     inject_into_skip,
     project_coords,
-    upcast,
 )
 from .minkunet import MinkUNetAttention
 from .polarmae import PolarMAEBackbone
@@ -23,5 +22,4 @@ __all__ = [
     "PolarMAEBackbone",
     "inject_into_skip",
     "project_coords",
-    "upcast",
 ]

@@ -366,6 +366,49 @@ def test_provenance_names_the_parts():
     assert p["backbone"] == "LinearBackbone" and p["teacher"]
 
 
+def _save_module(tmp_path, module) -> str:
+    from wcfm.engine.checkpoint import Checkpoint, save_checkpoint
+
+    path = tmp_path / "source.pt"
+    blob = Checkpoint(epoch=1, step=1, cfg={}, model=module.state_dict(), optimizer={}, rng={})
+    save_checkpoint(path, blob)
+    return str(path)
+
+
+def test_init_from_loads_the_backbone_but_not_the_tokens(tmp_path):
+    source = build("charge", teacher=False)
+    path = _save_module(tmp_path, source)
+    torch.manual_seed(1)
+    warm = SslModule(
+        backbone=LinearBackbone(in_dim=1, hidden=8, out_dim=8, inject_roles=("masked", "other")),
+        terms={"dino": DinoTerm(score_injected=True)},
+        augment=augment(),
+        teacher=EmaTeacher(0.9, 1.0),
+        init_from=path,
+    )
+    src = source.backbone.state_dict()
+    for name, t in warm.backbone.state_dict().items():
+        if name.startswith("tokens."):
+            assert not torch.equal(t, src.get(name, torch.zeros_like(t)))
+        else:
+            assert torch.equal(t, src[name]), name
+    for s, t in zip(warm.backbone.parameters(), warm.teacher_backbone.parameters(), strict=True):
+        assert torch.equal(s, t)
+    assert warm.provenance()["init_from"] == path
+
+
+def test_init_from_a_different_backbone_is_refused(tmp_path):
+    path = _save_module(tmp_path, build("charge", teacher=False))
+    with pytest.raises(RuntimeError, match="size mismatch"):
+        SslModule(
+            backbone=LinearBackbone(in_dim=1, hidden=16, out_dim=8),
+            terms={"charge": ChargeTerm()},
+            augment=augment(),
+            teacher=NoTeacher(),
+            init_from=path,
+        )
+
+
 def test_train_mode_keeps_the_teacher_in_eval():
     m = build("hybrid")
     m.train()

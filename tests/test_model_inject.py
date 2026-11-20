@@ -17,13 +17,13 @@ from warpconvnet.geometry.coords.integer import IntCoords  # noqa: E402
 from warpconvnet.geometry.features.cat import CatFeatures  # noqa: E402
 from warpconvnet.geometry.types.voxels import Voxels  # noqa: E402
 
+from wcfm.data.voxels import upcast  # noqa: E402
 from wcfm.model.backbones import (  # noqa: E402
     Injection,
     InjectionGroup,
     MinkUNetAttention,
     inject_into_skip,
     project_coords,
-    upcast,
 )
 
 from .fake_backbone import as_pairs  # noqa: E402
@@ -254,3 +254,49 @@ def test_bottleneck_depth_and_stage3_build_what_they_say():
     assert s3_params == one_params + stage_params
     with pytest.raises(ValueError, match="bottleneck_depth"):
         MinkUNetAttention(encoding_range=64, bottleneck_depth=0)
+
+
+def test_bottleneck_prenorm_is_one_stack_between_two_projections():
+    """On, the blocks carry no projections and the stack holds one on each side at any depth;
+    outside the bottleneck the network is the stream-norm one. The identity path itself is
+    pinned by `test_a_prenorm_bottleneck_with_silent_blocks_is_its_two_projections`."""
+    kw = dict(encoding_range=64, decoder="none", bottleneck_depth=3)
+    stream = MinkUNetAttention(**kw)
+    pre = MinkUNetAttention(**kw, bottleneck_prenorm=True)
+    keys = [k.split(".") for k in pre.state_dict() if k.startswith("bottleneck.")]
+    assert {k[1] for k in keys} == {"in_proj", "blocks", "norm", "out_proj"}
+    assert {k[2] for k in keys if k[1] == "blocks"} == {"0", "1", "2"}
+    assert not any(n in ("pre_proj", "post_proj") for k in keys for n in k)
+
+    def rest(m):
+        return {k: v.shape for k, v in m.state_dict().items() if not k.startswith("bottleneck.")}
+
+    assert rest(pre) == rest(stream)
+    with pytest.raises(ValueError, match="needs attention"):
+        MinkUNetAttention(encoding_range=64, attention=False, bottleneck_prenorm=True)
+
+
+def test_inject_enc2_adds_a_stride4_site_and_its_tokens_only_when_asked():
+    """Off, a stage3 backbone holds no `enc2` tokens, so its existing checkpoints load
+    strictly; on, `enc2` is an injection site with one token per role at its width."""
+    roles = ("masked", "candidate")
+    off = MinkUNetAttention(encoding_range=64, stage3=True, inject_roles=roles)
+    assert off.INJECT_TAPS == ("enc0", "enc1")
+    assert not any(k.startswith("tokens.enc2") for k in off.state_dict())
+    on = MinkUNetAttention(encoding_range=64, stage3=True, inject_roles=roles, inject_enc2=True)
+    assert on.INJECT_TAPS == ("enc0", "enc1", "enc2")
+    assert {k for k in on.state_dict() if k.startswith("tokens.enc2")} == {
+        "tokens.enc2__masked",
+        "tokens.enc2__candidate",
+    }
+    assert on.tokens["enc2__masked"].shape[0] == on.tap_dim("enc2")
+    # the tokens are built after the network, so every other parameter starts the same
+    torch.manual_seed(0)
+    a = MinkUNetAttention(encoding_range=64, stage3=True, inject_roles=roles).state_dict()
+    torch.manual_seed(0)
+    b = MinkUNetAttention(
+        encoding_range=64, stage3=True, inject_roles=roles, inject_enc2=True
+    ).state_dict()
+    assert all(torch.equal(a[k], b[k]) for k in a)
+    with pytest.raises(ValueError, match="needs stage3"):
+        MinkUNetAttention(encoding_range=64, inject_enc2=True)

@@ -40,12 +40,15 @@ store=$3
 outdir=$4
 stages=$5
 eval_set=$6
+# Comma-separated taps to score; `out` writes to outdir, any other tap to outdir/<tap>.
+probe_taps=${7:-out}
 
 echo "Running ${CLUSTER_ID:-?}.${JOB_ID:-?} on $(hostname)"
 echo "  store=${store}"
 echo "  outdir=${outdir}"
 echo "  stages=${stages}"
 echo "  eval_set=${eval_set}"
+echo "  probe_taps=${probe_taps}"
 echo ""
 
 export PYTHONUNBUFFERED=1
@@ -78,10 +81,14 @@ fi
 # are kilobytes and `write_json` is already atomic (temp file in the same directory, renamed
 # over), so there is nothing for a sync step to protect against and a job killed mid-suite
 # leaves every completed stage behind rather than none of them.
-mkdir -p "${outdir}"
-python -u -m wcfm.cli eval probe "${store}" --stages="${stages}" --out-dir="${outdir}" \
-  --eval-set-root="${eval_set}" --device=cpu
-rc=$?
+rc=0
+for tap in ${probe_taps//,/ }; do
+  tapdir="${outdir}"
+  [ "${tap}" = out ] || tapdir="${outdir}/${tap}"
+  mkdir -p "${tapdir}"
+  python -u -m wcfm.cli eval probe "${store}" --stages="${stages}" --out-dir="${tapdir}" \
+    --tap="${tap}" --eval-set-root="${eval_set}" --device=cpu || rc=$?
+done
 
 n_json=$(find "${outdir}" -name '*.json' 2>/dev/null | wc -l)
 echo "probe JSONs in ${outdir}: ${n_json}"

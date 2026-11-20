@@ -189,7 +189,7 @@ def test_all_nodes_share_one_eval_set_so_the_epochs_are_comparable(tmp_path):
     for e in (1, 5, 10):
         assert f"'--eval-set-root={root}'" in subs[f"extract_ep{e}.sub"]
         probe_args = re.search(r'arguments += +"(.*)"', subs[f"probes_ep{e}.sub"]).group(1)
-        assert probe_args.split()[-1] == str(root)
+        assert probe_args.split()[5] == str(root)  # the 6th argument of probesjob.sh
 
 
 def test_build_dag_writes_nothing(tmp_path):
@@ -351,3 +351,41 @@ def test_diff_code_compares_the_two_archives(tmp_path, capfd):
     # `capfd`, not `capsys`: `diff` is a subprocess writing to the real file descriptor.
     out = capfd.readouterr().out
     assert "-one" in out and "+two" in out
+
+
+def test_probe_taps_reach_every_probes_node(tmp_path):
+    plan = dataclasses.replace(_plan(tmp_path), probe_taps="out,dec_half,out+dec_half")
+    subs = {k.name: v for k, v in build_dag(plan).items() if k.suffix == ".sub"}
+    probes = [v for k, v in subs.items() if k.startswith("probes_")]
+    assert probes and all(" out,dec_half,out+dec_half\"" in v for v in probes)
+
+
+def test_a_store_without_the_requested_or_upcast_tap_is_re_extracted(tmp_path):
+    """Matching checkpoint bytes are not enough: a store extracted before `--taps=dec_half
+    --upcast` was asked for would be skipped and every probe of that tap would fail."""
+    import hashlib
+    import json
+    import subprocess
+
+    stale = next(v for k, v in build_dag(_plan(tmp_path)).items() if k.name == "stale.sh")
+    script = tmp_path / "stale.sh"
+    script.write_text(stale)
+    ckpt = tmp_path / "c.pt"
+    ckpt.write_bytes(b"weights")
+    store = tmp_path / "store"
+    store.mkdir()
+
+    def run(prov, taps, upcast):
+        prov = {"checkpoint_sha256": hashlib.sha256(b"weights").hexdigest(), **prov}
+        (store / "provenance.json").write_text(json.dumps(prov))
+        args = ["bash", str(script), str(ckpt), str(store), taps, upcast]
+        return subprocess.run(args, capture_output=True).returncode
+
+    out_only = {"taps": ["out"], "tap_strides": {"out": 1}}
+    strided = {"taps": ["out", "dec_half"], "tap_strides": {"out": 1, "dec_half": 2}}
+    upcast = {"taps": ["out", "dec_half"], "tap_strides": {"out": 1, "dec_half": 1}}
+    assert run(out_only, "-", "0") == 1  # current: skip
+    assert run(out_only, "dec_half", "1") == 0  # tap missing: extract
+    assert run(strided, "dec_half", "1") == 0  # written strided: extract
+    assert run(strided, "dec_half", "0") == 1
+    assert run(upcast, "dec_half", "1") == 1

@@ -23,6 +23,7 @@ the token and the group's point positions, with an MSE.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any, ClassVar
 
 from torch import Tensor
@@ -39,9 +40,10 @@ from .losses import charge_loss
 class ChargeTerm(Term):
     requires_masking: ClassVar[bool] = True
 
-    def __init__(self, *, weight: float = 0.1):
+    def __init__(self, *, weight: float = 0.1, inject_taps: Iterable[str] = ()):
         super().__init__(weight=weight)
         self.head: SparseConv2d | None = None
+        self._requested_taps = tuple(inject_taps)
         self._inject_taps: tuple[str, ...] = ()
         self._last_pred: Tensor | None = None
 
@@ -52,8 +54,9 @@ class ChargeTerm(Term):
         # Requesting the same coordinates at a coarser skip as well lands them on the grid an
         # occupancy term enumerates its candidates on -- and since those candidates cover every
         # cell the masker wiped, every projected coordinate is also a candidate, so the
-        # backbone refuses the step for a coordinate carrying two roles.
-        self._inject_taps = tuple(
+        # backbone refuses the step for a coordinate carrying two roles. `inject_taps` may add
+        # a coarser site no candidate is enumerated at, such as `enc2` under `stage3`.
+        self._inject_taps = self._requested_taps or tuple(
             t for t in backbone.INJECT_TAPS if backbone.TAP_STRIDE.get(t, 1) == 1
         )
 
@@ -67,7 +70,13 @@ class ChargeTerm(Term):
                 f"term {self.name!r} regresses the charge masking removed and no masker is "
                 "configured; select an augment with a masker, or remove the term"
             )
-        if not self._inject_taps:
+        unknown = sorted(set(self._inject_taps) - set(backbone.INJECT_TAPS))
+        if unknown:
+            raise ValueError(
+                f"term {self.name!r} injects at {unknown} and {type(backbone).__name__} injects "
+                f"at {list(backbone.INJECT_TAPS)}"
+            )
+        if not any(backbone.TAP_STRIDE.get(t, 1) == 1 for t in self._inject_taps):
             sites = {t: backbone.TAP_STRIDE.get(t) for t in backbone.INJECT_TAPS}
             raise ValueError(
                 f"term {self.name!r} regresses the charge at full resolution and needs a "

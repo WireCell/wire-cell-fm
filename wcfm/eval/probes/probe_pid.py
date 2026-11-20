@@ -248,7 +248,7 @@ def run_one(store_root: Path, args) -> dict:
     )
     fx.require("pixel_labels")
 
-    print(f"\n=== {run_label(store_root, args.source)} ===")
+    print(f"\n=== {run_label(store_root, args.source, args.tap)} ===")
     print(f"  events={fx.n_events}  rows={fx.n_pixels}  D={fx.feat.shape[1]}")
     ep = fx.provenance.get("epoch", "?")
     bb = fx.provenance.get("backbone_name", "?")
@@ -321,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     args = probe_argv("pid", argv, default_out="pid_probe.json")
     results = {}
     for store in args.features:
-        results[run_label(store, args.source)] = run_one(Path(store), args)
+        results[run_label(store, args.source, args.tap)] = run_one(Path(store), args)
         write_json(results, args.out)
     write_json(results, args.out)
     print(f"\nwrote {args.out}")

@@ -57,7 +57,7 @@ Consequences to hold in mind when changing either side:
 
 ## Objectives and their presets
 
-Four objectives are nominal. Each has a final recipe in `conf/experiment/`, and a new run starts
+Five objectives are nominal. Each has a final recipe in `conf/experiment/`, and a new run starts
 from one of these, not from a `model=` preset alone:
 
 - `polarmae`, PoLAr-MAE trained on its own: a point-cloud MAE on `pointmae` (chamfer and energy
@@ -72,17 +72,22 @@ from one of these, not from a `model=` preset alone:
 - `hybrid`, DINO whose masked pixels are reinjected as `masked` tokens and scored by the same
   cross-entropy (`score_injected: true`); no occupancy term: `hybrid_ddp6_eb600`.
 
-`mae` (charge plus occupancy) stays `config.yaml`'s default and is not nominal.
+- `mae_grown`, charge plus occupancy asked of candidates grown from the bottleneck
+  (`model.terms.occupancy.candidates: grown`): `mae_frontier` (the U-Net at width 128 with
+  `stage3` and a pre-norm bottleneck of 8 blocks, charge at the masked pixels with the `masked`
+  token also at `enc2`; three region-wiped copies per step, 1 rank x 32, lr 6e-5, 32-true).
+  Both the pre-norm bottleneck and the lr are needed: with stream-norm blocks the gradient
+  reaching `enc3` is exactly zero from step ~20k, and at the reference's lr 2e-4 every stage's
+  gradient grows from step ~50k and the representation degrades after epoch 9. Score it at
+  `out`, at `dec_half` and at both
+  (`wcfm eval submit ... --taps=dec_half --upcast --probe-taps=out,dec_half,out+dec_half`).
 
-Missing: no experiment yet tests charge plus occupancy where the model has to find the true
-pixels inside a large wiped region. `mae` asks it only of a candidate list the masker enumerates
-up front (`model.augment.masker.build_candidates`, `neg_per_pos`). The generative grow path,
-where coordinates are grown from the bottleneck into the hole and the prediction set is the
-candidate set, is not in wcfm. Adding it and giving it a preset is the open fifth objective.
+`mae` (charge plus occupancy over the masker's enumerated candidates) stays `config.yaml`'s
+default and is not nominal.
 
 A preset's `run.name` is the run it produces, and the file name need not match it:
 `polarmae_short` writes `wcfm_polarmae_200k_b80k`, `polarmae_long` writes
-`wcfm_polarmae_200k_10M_lr35`.
+`wcfm_polarmae_200k_10M_lr35`, `mae_frontier` writes `wcfm_mae_frontier_prenorm_lr60`.
 Compose a preset against its run's `config.yaml` before editing it; only `data.cache_dir`,
 `run.output_root` and, for the two PoLAr-MAE runs, the unread `run.save_every_minutes` differ.
 `hybrid_ddp6_eb600` has no run of its own yet.

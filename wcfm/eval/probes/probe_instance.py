@@ -206,7 +206,7 @@ def run_one(store_root: Path, args) -> dict:
         store_root, source=args.source, tap=args.tap, eval_set_root=args.eval_set_root
     )
     fx.require("pixel_labels", "pixel_trackid")
-    print(f"\n=== {run_label(store_root, args.source)} ===")
+    print(f"\n=== {run_label(store_root, args.source, args.tap)} ===")
 
     entry = run_header(fx, args.seed, 0)
     entry["metrics_run"] = ["instance"]
@@ -272,7 +272,7 @@ def main(argv: list[str] | None = None) -> int:
     args = probe_argv("instance", argv, default_out="instance.json", extra=extra)
     results = {}
     for store in args.features:
-        results[run_label(store, args.source)] = run_one(Path(store), args)
+        results[run_label(store, args.source, args.tap)] = run_one(Path(store), args)
         write_json(results, args.out)
     write_json(results, args.out)
     print(f"\nwrote {args.out}")

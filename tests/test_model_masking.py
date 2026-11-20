@@ -336,14 +336,32 @@ def test_a_capped_run_sub_samples_and_never_relabels():
 # ----------------------------------------------------------------- construction rules
 
 
-def test_an_indivisible_canvas_is_refused():
+def test_an_indivisible_canvas_is_refused_when_candidates_are_built():
     with pytest.raises(ValueError, match="evenly"):
-        RegionMasker(image_w=1050, image_h=1500, cell_w=64, cell_h=100)
+        RegionMasker(image_w=1050, image_h=1500, cell_w=64, cell_h=100, build_candidates=True)
 
 
-def test_the_cell_must_divide_the_candidate_stride():
+def test_the_cell_must_divide_the_candidate_stride_when_candidates_are_built():
     with pytest.raises(ValueError, match="stride"):
-        RegionMasker(image_w=105, image_h=100, cell_w=7, cell_h=10, cand_stride=2)
+        RegionMasker(
+            image_w=105, image_h=100, cell_w=7, cell_h=10, cand_stride=2, build_candidates=True
+        )
+
+
+def test_a_partial_last_column_is_its_own_cell_not_the_next_rows_first():
+    """16 does not tile 1050: the last column holds 10 pixels. With a floor-sized grid a pixel
+    there indexed the first cell of the next row, so one wipe took both."""
+    m = RegionMasker(image_w=1050, image_h=1500, cell_w=16, cell_h=25)
+    assert (m.n_cols, m.n_rows) == (66, 60)
+    coords = torch.tensor([[1045, 0], [0, 25]], dtype=torch.int32)  # last col row 0; row 1 col 0
+    offsets = torch.tensor([0, 2], dtype=torch.int64)
+    vox = Voxels(
+        batched_coordinates=IntCoords(coords, offsets=offsets),
+        batched_features=CatFeatures(torch.ones(2, 1), offsets=offsets),
+        offsets=offsets,
+    )
+    _, (_, ucells) = m._select(vox, torch.zeros(2, dtype=torch.int64))
+    assert ucells.shape[0] == 2
 
 
 def test_the_production_grid_is_exact():

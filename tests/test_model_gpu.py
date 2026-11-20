@@ -197,6 +197,28 @@ def test_qk_norm_flash_and_dense_paths_agree(device):
     torch.testing.assert_close(a.feature_tensor, b.feature_tensor, rtol=2e-2, atol=2e-2)
 
 
+def test_a_prenorm_bottleneck_with_silent_blocks_is_its_two_projections(device):
+    """The identity path: with every block's attention and MLP output zeroed, a depth-8 stack
+    is `out_proj(norm(in_proj(x)))`, and the encoder below it still receives a gradient."""
+    torch.manual_seed(0)
+    m = MinkUNetAttention(
+        encoding_range=64, stage3=True, bottleneck_depth=8, bottleneck_prenorm=True
+    ).to(device)
+    b = m.bottleneck
+    with torch.no_grad():
+        for blk in b.blocks:
+            for lin in (blk.attn.proj, blk.mlp[2]):
+                lin.weight.zero_()
+                lin.bias.zero_()
+    xs, _ = scene(device)
+    with torch.no_grad():
+        taps = m.eval()(xs, None, ("bottleneck", "bottleneck_attn")).taps
+        direct = b.out_proj(b.norm(b.in_proj(taps["bottleneck"])))
+    torch.testing.assert_close(direct.feature_tensor, taps["bottleneck_attn"].feature_tensor)
+    m.train()(xs).out.feature_tensor.square().sum().backward()
+    assert m.conv3[0].weight.grad.abs().sum() > 0
+
+
 def test_the_plain_decoder_emits_on_the_input_rows(device):
     m = MinkUNetAttention(encoding_range=64, decoder="plain").to(device).eval()
     xs, removed = scene(device)
@@ -318,3 +340,90 @@ def test_term_gradients_decomposes_the_objective_on_the_real_backbone(device):
     assert report["terms"] == ["charge", "dino"]
     assert report["scope"] == "backbone" and report["n_parameters"] == n_backbone
     assert -1.0 <= report["cosine"]["charge|dino"] <= 1.0
+
+
+# ------------------------------------------------------------------- generative occupancy
+
+
+def test_the_grown_base_is_the_real_bottlenecks_coordinates(device):
+    """`OccupancyTerm` grows candidates before the forward from `unique(visible // 8)`; that
+    is only the bottleneck's support if the strided stages floor-divide and attention keeps
+    the coordinates. Asserted on the real backbone, two images, one with a hole."""
+    from wcfm.data.voxels import voxels_from
+
+    m = MinkUNetAttention(encoding_range=64, stage3=True, bottleneck_depth=2).to(device).eval()
+    xs, _ = scene(device)
+    other = torch.tensor([[3, 60], [17, 9], [63, 0], [40, 41]], dtype=torch.int32, device=device)
+    coords = torch.cat([xs.coordinate_tensor, other])
+    n0 = xs.coordinate_tensor.shape[0]
+    ones = torch.ones(coords.shape[0], 1, device=device)
+    two = voxels_from(coords, ones, torch.tensor([0, n0, coords.shape[0]]))
+    with torch.no_grad():
+        bott = m(two, None, ("bottleneck_attn",)).taps["bottleneck_attn"]
+    for b in range(2):
+        want = torch.unique(torch.div(rows_of(two, b), 8, rounding_mode="floor"), dim=0)
+        assert as_pairs(rows_of(bott, b)) == as_pairs(want)
+
+
+def test_enc2_injection_reaches_the_quarter_stage_and_is_reported(device):
+    torch.manual_seed(0)
+    m = MinkUNetAttention(
+        encoding_range=64, stage3=True, inject_roles=("masked", "candidate"), inject_enc2=True
+    ).to(device).eval()
+    xs, removed = scene(device)
+    inject = Injection([InjectionGroup(t, [removed], "masked", 1) for t in ("enc0", "enc2")])
+    with torch.no_grad():
+        plain = m(xs, None, ("dec_quarter",))
+        bundle = m(xs, inject, ("dec_quarter",))
+    quarter = as_pairs(bundle.taps["dec_quarter"].coordinate_tensor)
+    assert as_pairs(torch.div(removed, 4, rounding_mode="floor")) <= quarter
+    assert len(quarter) > len(as_pairs(plain.taps["dec_quarter"].coordinate_tensor))
+    assert {(g.tap, g.stride) for g in bundle.injected.groups} == {("enc0", 1), ("enc2", 4)}
+    assert as_pairs(removed) <= as_pairs(bundle.out.coordinate_tensor)
+
+
+def test_grown_occupancy_with_charge_trains_on_the_real_backbone(shared_tmp):
+    """Charge at the masked pixels (injected at enc0 and enc2) plus grown occupancy on three
+    region-wiped copies, through the Trainer. Every token a term uses must move."""
+    from lightning_fabric import Fabric
+
+    from wcfm.engine.trainer import Trainer
+    from wcfm.model.augment import RegionMasker
+    from wcfm.model.modules import NoTeacher
+    from wcfm.model.terms import OccupancyTerm
+
+    from .test_engine import cfg
+
+    random.seed(0)
+    torch.manual_seed(0)
+    module = SslModule(
+        backbone=MinkUNetAttention(
+            encoding_range=64,
+            stage3=True,
+            bottleneck_depth=2,
+            inject_roles=("masked", "candidate"),
+            inject_enc2=True,
+        ),
+        terms={
+            "charge": ChargeTerm(weight=2.0, inject_taps=("enc0", "enc2")),
+            "occupancy": OccupancyTerm(weight=0.3, candidates="grown", grow_iters=3),
+        },
+        augment=Augment(
+            masker=RegionMasker(image_w=W, image_h=H, cell_w=16, cell_h=25, wipe_max=0.5),
+            copies=3,
+        ),
+        teacher=NoTeacher(),
+    )
+    used = ("enc0__masked", "enc2__masked", "enc1__candidate")
+    before = {k: module.backbone.tokens[k].detach().clone() for k in used}
+    trainer = Trainer(
+        cfg(shared_tmp, optim__epochs=1, metrics__step_cadence=1, run__precision="32-true"),
+        module,
+        fabric=Fabric(accelerator="cuda", devices=1, precision="32-true"),
+        loader=batch_loader(steps=3, counts=(300, 250), width=W, height=H, blob=True),
+        run_dir=shared_tmp / "gpu_mae_grown",
+    )
+    result = trainer.fit()
+    assert result["steps"] == 3 and result["skipped_nonfinite"] == 0
+    for k in used:
+        assert not torch.equal(module.backbone.tokens[k].detach().cpu(), before[k].cpu()), k

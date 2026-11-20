@@ -22,8 +22,10 @@ from .features import Features, raw_charge_kind
 __all__ = ["run_header", "run_label", "write_json"]
 
 
-def run_label(store_root: Path | str, source: str) -> str:
-    """`<run>:<epoch tag>:<source>`, e.g. `hybrid_baseline_mixed_b100:ep100:student`.
+def run_label(store_root: Path | str, source: str, tap: str = "out") -> str:
+    """`<run>:<epoch tag>:<source>`, e.g. `hybrid_baseline_mixed_b100:ep100:student`, with
+    `:<tap>` appended for any tap but `out`. Merging results keys rows by this label, so two
+    taps of one epoch must not share it.
 
     Derived from the store's layout, `<run>/features/epoch<N>/`. The epoch directory is named
     `epochN` and the tag is `epN`, because that is the key every recorded result file and every
@@ -34,7 +36,8 @@ def run_label(store_root: Path | str, source: str) -> str:
     tag = f"ep{name[len('epoch'):]}" if name.startswith("epoch") else name
     # `<run>/features/<epochN>` -- parents[0] is `features`, parents[1] is the run.
     run = path.parents[1].name if len(path.parents) >= 2 else path.parent.name
-    return f"{run}:{tag}:{source}"
+    label = f"{run}:{tag}:{source}"
+    return label if tap == "out" else f"{label}:{tap}"
 
 
 def write_json(results: dict, out_path: Path | str) -> None:

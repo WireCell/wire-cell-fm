@@ -26,6 +26,15 @@ fall outside the crop entirely. Those are conditions rather than bugs, and they 
 either -- the term intersects its labelled candidates against what the backbone reports it
 placed, and counts every survivor it had to drop into `occ_dropped`.
 
+With `candidates="grown"` the masker enumerates nothing. The candidates are grown from the
+bottleneck's coordinates, `unique(visible // bottleneck_stride)`: each stage doubles them and
+adds the 3x3 neighbourhood until they reach the read stride, then `grow_iters - 1` more 3x3
+dilations run there. Those are exactly the coordinates a stack of stride-2 kernel-3 generative
+transposed convolutions would emit, computed before the forward because they depend on
+geometry alone. The question is then asked of every row of `dec_half`, visible structure
+included, and a row is positive when its 2x2 block holds any pixel of the unmasked image.
+`test_model_gpu.py` pins the grown base against the real `bottleneck_attn` coordinates.
+
 `ChamferTerm` asks the where-question of PoLAr-MAE, where the decoder emits one token per
 masked group and the head predicts the group's points as a set, scored by Chamfer distance.
 """
@@ -38,6 +47,8 @@ import torch
 from torch import Tensor
 from warpconvnet.geometry.types.voxels import Voxels
 from warpconvnet.nn.modules.sparse_conv import SparseConv2d
+
+from wcfm.data.voxels import batched_keys
 
 from ..augment.views import Augment, View, ViewPlan
 from ..backbones.base import Backbone, FeatureBundle, Injection, InjectionGroup
@@ -57,10 +68,25 @@ class OccupancyTerm(Term):
     #: at each of them by the time `READ_TAP` is produced.
     INJECT_TAP: ClassVar[str] = "enc1"
 
-    def __init__(self, *, weight: float = 1.0, alpha: float = 0.25, gamma: float = 2.0):
+    def __init__(
+        self,
+        *,
+        weight: float = 1.0,
+        alpha: float = 0.25,
+        gamma: float = 2.0,
+        candidates: str = "masker",
+        grow_iters: int = 1,
+    ):
         super().__init__(weight=weight)
+        if candidates not in ("masker", "grown"):
+            raise ValueError(f"candidates must be 'masker' or 'grown', got {candidates!r}")
+        if grow_iters < 1:
+            raise ValueError(f"grow_iters must be at least 1, got {grow_iters}")
         self.alpha = float(alpha)
         self.gamma = float(gamma)
+        self.grown = candidates == "grown"
+        self.grow_iters = int(grow_iters)
+        self._bott_stride = 0
         self.block: ResidualSparseBlock2D | None = None
         self.head: SparseConv2d | None = None
         self._dropped = 0
@@ -69,6 +95,7 @@ class OccupancyTerm(Term):
 
     def build(self, backbone: Backbone) -> None:
         dim = backbone.tap_dim(self.READ_TAP)
+        self._bott_stride = int(backbone.TAP_STRIDE.get("bottleneck_attn", 0))
         self.block = ResidualSparseBlock2D(dim, dim, kernel_size=3)
         self.head = SparseConv2d(dim, 1, kernel_size=1, bias=True)
 
@@ -83,7 +110,9 @@ class OccupancyTerm(Term):
                 f"term {self.name!r} asks whether a masked coordinate was occupied and no "
                 "masker is configured; select an augment with a masker, or remove the term"
             )
-        if not getattr(masker, "builds_candidates", False):
+        if self.grown:
+            self._validate_grown(backbone, masker)
+        elif not getattr(masker, "builds_candidates", False):
             raise ValueError(
                 f"term {self.name!r} needs the masker to enumerate occupancy candidates, and "
                 f"{type(masker).__name__} produces none. Select model/masker=region with "
@@ -118,11 +147,33 @@ class OccupancyTerm(Term):
                 "removed voxel, which is only a well-posed question if the cell was wiped; "
                 f"masker flavor is {getattr(masker, 'flavor', None)!r}, set flavor: wipe"
             )
+        if self.grown:
+            return
         if not getattr(masker, "neg_per_pos", None) and not getattr(masker, "max_neg", None):
             raise ValueError(
                 f"term {self.name!r} runs on a candidate set that is overwhelmingly empty and "
                 "no negatives cap is set; set model.augment.masker.neg_per_pos or .max_neg, "
                 "choosing the cap against the positive rate this masker and grid produce"
+            )
+
+    def _validate_grown(self, backbone: Backbone, masker: Any) -> None:
+        ratio = self._bott_stride // self.READ_STRIDE
+        if self._bott_stride % self.READ_STRIDE or ratio < 1 or ratio & (ratio - 1):
+            raise ValueError(
+                f"term {self.name!r} grows candidates from the bottleneck by doubling, and "
+                f"{type(backbone).__name__} has bottleneck_attn at stride {self._bott_stride}, "
+                f"not a power-of-two multiple of {self.READ_STRIDE}"
+            )
+        if getattr(backbone, "inject_at", "skips") != "skips":
+            raise ValueError(
+                f"term {self.name!r} grows candidates from the visible pixels' bottleneck; with "
+                "inject_at='input' the bottleneck also holds the injected tokens; set "
+                "inject_at: skips"
+            )
+        if getattr(masker, "builds_candidates", False):
+            raise ValueError(
+                f"term {self.name!r} grows its own candidates, so the masker's enumeration would "
+                "be computed and ignored; set build_candidates: false"
             )
 
     # ------------------------------------------------------ inside the wrapped forward
@@ -143,6 +194,15 @@ class OccupancyTerm(Term):
     # -------------------------------------------------------------------- per step
 
     def injection_request(self, view: View) -> Injection | None:
+        if self.grown:
+            if view.mask is None:
+                return None
+            coords = grow_candidates(
+                view.voxels, self._bott_stride, self.READ_STRIDE, self.grow_iters
+            )
+            return Injection(
+                [InjectionGroup(self.INJECT_TAP, coords, "candidate", self.READ_STRIDE)]
+            )
         if view.mask is None or view.mask.cand_coords is None:
             return None
         return Injection(
@@ -164,6 +224,8 @@ class OccupancyTerm(Term):
     ) -> TermOutput:
         view = plan.views[view_idx]
         assert view.mask is not None, "validate() requires a masker"
+        if self.grown:
+            return self._compute_grown(bundle, head_out, view)
         coords, targets = view.mask.cand_coords, view.mask.occ_targets
         if coords is None or targets is None:
             raise ValueError(
@@ -185,6 +247,32 @@ class OccupancyTerm(Term):
                 "occ_candidates": float(target.numel()),
                 "occ_positive_rate": (n_pos / target.numel()) if target.numel() else 0.0,
                 "occ_dropped": float(self._dropped),
+            },
+        )
+
+    def _compute_grown(self, bundle: FeatureBundle, head_out: Voxels, view: View) -> TermOutput:
+        pred = head_out.feature_tensor.reshape(-1)
+        target = occupied_at(head_out, view.clean, self.READ_STRIDE).to(pred.dtype)
+        # A strided convolution drops trailing empty images from its offsets.
+        seg = (head_out.offsets[1:] - head_out.offsets[:-1]).to(torch.int64)
+        counts = torch.cat([seg, seg.new_zeros(view.batch_size - seg.shape[0])])
+        loss = occupancy_loss(pred, target, counts, alpha=self.alpha, gamma=self.gamma)
+        n_grown = 0
+        if bundle.injected is not None:
+            n_grown = sum(
+                int(c.shape[0])
+                for g in bundle.injected.groups
+                if g.tap == self.INJECT_TAP and g.role == "candidate"
+                for c in g.coords
+            )
+        n = target.numel()
+        return TermOutput(
+            loss=loss,
+            scalars={
+                "loss_occ": float(loss.detach()),
+                "occ_candidates": float(n),
+                "occ_positive_rate": float(target.sum().item()) / n if n else 0.0,
+                "occ_grown": float(n_grown),
             },
         )
 
@@ -246,3 +334,47 @@ def _rows_in(rows: Tensor, other: Tensor) -> Tensor:
     key_r = rows[:, 1].long() * span + rows[:, 0].long()
     key_o = other[:, 1].long() * span + other[:, 0].long()
     return torch.isin(key_r, key_o)
+
+
+_NEIGHBOURS = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+
+
+def grow_candidates(
+    voxels: Voxels, bott_stride: int, read_stride: int, iters: int
+) -> list[Tensor]:
+    """Per image, the coordinates grown from the bottleneck, in units of `read_stride`.
+
+    The bottleneck's coordinates are the visible pixels floor-divided by `bott_stride`. Each
+    stage doubles every coordinate and adds its 3x3 neighbourhood, until the grid reaches
+    `read_stride`; then `iters - 1` more 3x3 dilations run there. Coordinates are clamped at 0
+    and not above, and may repeat: `inject_into_skip` deduplicates them against the skip.
+    """
+    coords = voxels.coordinate_tensor
+    off = torch.tensor(_NEIGHBOURS, dtype=coords.dtype, device=coords.device)
+    stages = (bott_stride // read_stride).bit_length() - 1
+    out: list[Tensor] = []
+    for b in range(len(voxels.offsets) - 1):
+        c = coords[int(voxels.offsets[b]) : int(voxels.offsets[b + 1])]
+        g = torch.unique(torch.div(c, bott_stride, rounding_mode="floor"), dim=0)
+        for step in range(stages + iters - 1):
+            if step:
+                g = torch.unique(g, dim=0)
+            if step < stages:
+                g = g * 2
+            g = (g[:, None, :] + off[None, :, :]).reshape(-1, coords.shape[1]).clamp_(min=0)
+        out.append(g)
+    return out
+
+
+def occupied_at(rows: Voxels, clean: Voxels, stride: int) -> Tensor:
+    """Boolean over `rows`: does each row's `stride x stride` block hold a pixel of `clean`?
+
+    `rows` is in units of `stride`, `clean` at full resolution; both carry their own image
+    offsets, and a trailing image `rows` dropped simply contributes no rows.
+    """
+    rc = rows.coordinate_tensor.long()
+    if rc.shape[0] == 0:
+        return torch.zeros(0, dtype=torch.bool, device=rc.device)
+    cc = torch.div(clean.coordinate_tensor.long(), stride, rounding_mode="floor")
+    row_keys, clean_keys = batched_keys((rc, rows.offsets), (cc, clean.offsets))
+    return torch.isin(row_keys, clean_keys)

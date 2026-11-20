@@ -64,9 +64,16 @@ class ResidualSparseBlock2D(nn.Module):
 
 
 class BottleneckSparseAttention2D(nn.Module):
-    """Stream-norm transformer block on a sparse geometry: `1x1 in -> norm -> attention ->
-    residual -> norm -> MLP -> residual -> 1x1 out`. Matches WarpConvNet's `StreamNormBlock`,
-    and is not pre-norm."""
+    """Transformer block on a sparse geometry, in one of two forms.
+
+    Stream-norm (default): `1x1 in -> norm -> attention -> residual -> norm -> MLP -> residual
+    -> 1x1 out`, as WarpConvNet's `StreamNormBlock`. The residual adds the normalised tensor and
+    the block ends in a projection, so a stack of them has no identity path from its input to
+    its output.
+
+    `prenorm`: `x + attention(norm(x))`, then `x + MLP(norm(x))`, at `attn_channels` with no
+    projections; `channels` must equal `attn_channels`. `PreNormBottleneck` stacks these
+    between one projection on each side."""
 
     def __init__(
         self,
@@ -81,9 +88,14 @@ class BottleneckSparseAttention2D(nn.Module):
         encoding_channels: int = 32,
         flash: bool = True,
         qk_norm: bool = False,
+        prenorm: bool = False,
     ):
         super().__init__()
-        self.pre_proj = SparseConv2d(channels, attn_channels, kernel_size=1)
+        if prenorm and channels != attn_channels:
+            raise ValueError(f"a prenorm block runs at one width: {channels} != {attn_channels}")
+        self.prenorm = prenorm
+        if not prenorm:
+            self.pre_proj = SparseConv2d(channels, attn_channels, kernel_size=1)
         self.norm1 = LayerNorm(attn_channels)
         self.norm2 = LayerNorm(attn_channels)
         self.attn = SpatialFeatureAttention2D(
@@ -106,12 +118,39 @@ class BottleneckSparseAttention2D(nn.Module):
             GELU(),
             SparseConv2d(hidden, attn_channels, kernel_size=1),
         )
-        self.post_proj = SparseConv2d(attn_channels, channels, kernel_size=1)
+        if not prenorm:
+            self.post_proj = SparseConv2d(attn_channels, channels, kernel_size=1)
 
     def forward(self, x: Geometry) -> Geometry:
+        if self.prenorm:
+            x = x + self.attn(self.norm1(x))
+            return x + self.mlp(self.norm2(x))
         x2 = self.pre_proj(x)
         x2n = self.norm1(x2)
         x2 = x2n + self.attn(x2n)
         x2n = self.norm2(x2)
         x2 = x2n + self.mlp(x2n)
         return self.post_proj(x2)
+
+
+class PreNormBottleneck(nn.Module):
+    """`in_proj -> depth x prenorm BottleneckSparseAttention2D -> norm -> out_proj`.
+
+    The residual stream runs from `in_proj` to `norm` through every block unnormalised, so the
+    input's gradient reaches the encoder through two projections whatever the depth. `block_kw`
+    goes to each block."""
+
+    def __init__(self, channels: int, attn_channels: int, depth: int, **block_kw):
+        super().__init__()
+        self.in_proj = SparseConv2d(channels, attn_channels, kernel_size=1)
+        self.blocks = nn.Sequential(
+            *(
+                BottleneckSparseAttention2D(attn_channels, attn_channels, prenorm=True, **block_kw)
+                for _ in range(depth)
+            )
+        )
+        self.norm = LayerNorm(attn_channels)
+        self.out_proj = SparseConv2d(attn_channels, channels, kernel_size=1)
+
+    def forward(self, x: Geometry) -> Geometry:
+        return self.out_proj(self.norm(self.blocks(self.in_proj(x))))

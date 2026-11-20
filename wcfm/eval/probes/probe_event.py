@@ -120,13 +120,14 @@ def run_one(store_root: Path, args) -> dict:
     fx = load_features(
         store_root, source=args.source, tap=args.tap, eval_set_root=args.eval_set_root
     )
-    print(f"\n=== {run_label(store_root, args.source)} ===")
+    print(f"\n=== {run_label(store_root, args.source, args.tap)} ===")
 
     # Both sides were pooled over the SAME sampled pixels at extraction time, so the comparison
     # is not confounded by which pixels each side happened to see.
     try:
         pooled_feat = np.asarray(fx.event_means())
-        pooled_raw = np.asarray(fx.store.event_means(RAW_SOURCE, fx.tap))
+        # The raw baseline does not depend on the tap; extraction writes it under `out`.
+        pooled_raw = np.asarray(fx.store.event_means(RAW_SOURCE, "out"))
     except FileNotFoundError as exc:
         return {"event_knn": {"error": str(exc)}}
 
@@ -198,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     args = probe_argv("event", argv, default_out="event_probe.json")
     results = {}
     for store in args.features:
-        results[run_label(store, args.source)] = run_one(Path(store), args)
+        results[run_label(store, args.source, args.tap)] = run_one(Path(store), args)
         write_json(results, args.out)
     write_json(results, args.out)
     print(f"\nwrote {args.out}")

@@ -55,7 +55,9 @@ assert os.path.realpath(wcfm.__file__).startswith(repodir), \
 PY
 
 shopt -s nullglob
-files=("${dir}"/*.json)
+# probes/<tap>/ holds the taps other than `out`; their labels carry the tap, so one table holds
+# every tap as its own rows.
+files=("${dir}"/*.json "${dir}"/*/*.json)
 if [ ${#files[@]} -eq 0 ]; then
   echo "no probe JSONs in ${dir} -- nothing to merge"
   exit 2
